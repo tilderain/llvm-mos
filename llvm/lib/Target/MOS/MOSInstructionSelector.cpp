@@ -2037,6 +2037,12 @@ bool MOSInstructionSelector::selectUnMergeValues(MachineInstr &MI) {
 
     auto HiMerge = Builder.buildMergeValues(Hi16, {Up8, Top8});
     constrainGenericOp(*HiMerge);
+    
+    // START FIX
+    // Recursively select the newly created merge instruction so it is
+    // converted to a REG_SEQUENCE and doesn't remain as a generic opcode.
+    if (!select(*HiMerge)) return false;
+    // END FIX
 
     MI.eraseFromParent();
     return true;
