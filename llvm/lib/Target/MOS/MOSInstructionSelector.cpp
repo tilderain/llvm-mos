@@ -182,6 +182,8 @@ static const TargetRegisterClass &getRegClassForType(LLT Ty) {
     return MOS::Anyi8RegClass;
   case 16:
     return MOS::Imag16RegClass;
+  case 32:
+    return MOS::Imag24RegClass;
   }
 }
 
@@ -988,7 +990,44 @@ bool MOSInstructionSelector::selectBrCondImm(MachineInstr &MI) {
   MachineInstr *Load;
 
   Register LHS;
+
+  // Check if the condition comes from a G_CMPZ (Compare against Zero)
   if (MachineInstr *CMPZ = getOpcodeDef(MOS::G_CMPZ, CondReg, MRI)) {
+    // --- START FIX FOR W65816 CRASH ---
+    // If we are comparing a 32-bit value (W65816 24-bit pointer) against zero,
+    // manually expand it to bitwise-ORs instead of using CmpBrZeroMultiByte.
+    Register CmpSrc = CMPZ->getOperand(1).getReg();
+    LLT SrcTy = MRI.getType(CmpSrc);
+
+    if (STI.hasW65816() && SrcTy.getSizeInBits() == 32) {
+        LLT S8 = LLT::scalar(8);
+        
+        // Split the 32-bit register into bytes
+        auto Unmerge = Builder.buildUnmerge(S8, CmpSrc);
+        Register B0 = Unmerge.getReg(0); // Low
+        Register B1 = Unmerge.getReg(1); // Mid
+        Register B2 = Unmerge.getReg(2); // High
+        // B3 is padding, ignore it.
+
+        // OR the bytes together. (B0 | B1 | B2) is zero ONLY if all bytes are zero.
+        auto Or1 = Builder.buildOr(S8, B0, B1);
+        auto Or2 = Builder.buildOr(S8, Or1, B2);
+        
+        constrainSelectedInstRegOperands(*Or1, TII, TRI, RBI);
+        constrainSelectedInstRegOperands(*Or2, TII, TRI, RBI);
+
+        // Emit a standard 8-bit Compare-Branch-Zero on the result.
+        // This effectively branches if the 24-bit pointer is NULL (or not NULL).
+        auto CmpBr = Builder.buildInstr(MOS::CmpBrZero)
+            .addMBB(Tgt)
+            .addUse(MOS::Z, RegState::Undef)
+            .addImm(FlagVal)
+            .addUse(Or2.getReg(0));
+            
+        constrainSelectedInstRegOperands(*CmpBr, TII, TRI, RBI);
+        MI.eraseFromParent();
+        return true;
+    }
     auto Branch =
         Builder.buildInstr(MOS::CmpBrZeroMultiByte).addMBB(Tgt).addImm(FlagVal);
     for (const MachineOperand &MO : CMPZ->uses())
@@ -1095,7 +1134,7 @@ bool MOSInstructionSelector::selectBrCondImm(MachineInstr &MI) {
     MI.eraseFromParent();
     return true;
   }
-
+  
   auto GBR = Builder.buildInstr(MOS::GBR)
                  .addMBB(MI.getOperand(1).getMBB())
                  .addUse(MI.getOperand(0).getReg())
@@ -1701,7 +1740,30 @@ bool MOSInstructionSelector::selectMergeValues(MachineInstr &MI) {
   MachineIRBuilder Builder(MI);
   const MachineRegisterInfo &MRI = *Builder.getMRI();
 
-  auto [Dst, Lo, Hi] = MI.getFirst3Regs();
+  Register Dst = MI.getOperand(0).getReg();
+  LLT Ty = MRI.getType(Dst);
+
+  // Handle 32-bit merge
+  if (Ty.getSizeInBits() == 32) {
+    Register Lo = MI.getOperand(1).getReg();
+    Register Hi = MI.getOperand(2).getReg();
+    Register Up = MI.getOperand(3).getReg();
+    Register Top = MI.getOperand(4).getReg();
+
+    auto RegSeq = Builder.buildInstr(MOS::REG_SEQUENCE)
+                      .addDef(Dst)
+                      .addUse(Lo).addImm(MOS::sublo)
+                      .addUse(Hi).addImm(MOS::subhi)
+                      .addUse(Up).addImm(MOS::subupper)
+                      .addUse(Top).addImm(MOS::subtop);
+    constrainGenericOp(*RegSeq);
+    MI.eraseFromParent();
+    return true;
+  }
+
+  // Handle 16-bit merge
+  Register Lo = MI.getOperand(1).getReg();
+  Register Hi = MI.getOperand(2).getReg();
 
   auto LoConst = getIConstantVRegValWithLookThrough(Lo, MRI);
   auto HiConst = getIConstantVRegValWithLookThrough(Hi, MRI);
@@ -1917,21 +1979,87 @@ bool MOSInstructionSelector::selectIncDecMB(MachineInstr &MI) {
 }
 
 bool MOSInstructionSelector::selectUnMergeValues(MachineInstr &MI) {
-  auto [Lo, Hi, Src] = MI.getFirst3Regs();
-
   MachineIRBuilder Builder(MI);
+  Register Src = MI.getOperand(MI.getNumOperands() - 1).getReg();
+  LLT Ty = Builder.getMRI()->getType(Src);
+  LLT DstTy = Builder.getMRI()->getType(MI.getOperand(0).getReg());
+
+  // Handle 32-bit unmerge to 8-bit parts
+  if (Ty.getSizeInBits() == 32 && DstTy.getSizeInBits() == 8) {
+    Register Lo = MI.getOperand(0).getReg();
+    Register Hi = MI.getOperand(1).getReg();
+    Register Up = MI.getOperand(2).getReg();
+    Register Top = MI.getOperand(3).getReg();
+
+    auto LoCopy = Builder.buildCopy(Lo, Src);
+    LoCopy->getOperand(1).setSubReg(MOS::sublo);
+    constrainGenericOp(*LoCopy);
+
+    auto HiCopy = Builder.buildCopy(Hi, Src);
+    HiCopy->getOperand(1).setSubReg(MOS::subhi);
+    constrainGenericOp(*HiCopy);
+
+    auto UpCopy = Builder.buildCopy(Up, Src);
+    UpCopy->getOperand(1).setSubReg(MOS::subupper);
+    constrainGenericOp(*UpCopy);
+
+    auto TopCopy = Builder.buildCopy(Top, Src);
+    TopCopy->getOperand(1).setSubReg(MOS::subtop);
+    constrainGenericOp(*TopCopy);
+
+    MI.eraseFromParent();
+    return true;
+  }
+
+  // Handle 32-bit unmerge to 16-bit parts
+  if (Ty.getSizeInBits() == 32 && DstTy.getSizeInBits() == 16) {
+    Register Lo16 = MI.getOperand(0).getReg();
+    Register Hi16 = MI.getOperand(1).getReg();
+
+    // Extract Lower 16 bits directly using sublo16
+    auto LoCopy = Builder.buildCopy(Lo16, Src);
+    LoCopy->getOperand(1).setSubReg(MOS::sublo16);
+    constrainGenericOp(*LoCopy);
+
+    // Extract Upper 16 bits by extracting 8-bit parts and merging
+    LLT S8 = LLT::scalar(8);
+    
+    // Explicitly create virtual registers to handle the merge cleanly
+    Register Up8 = Builder.getMRI()->createGenericVirtualRegister(S8);
+    auto UpCopy = Builder.buildCopy(Up8, Src);
+    UpCopy->getOperand(1).setSubReg(MOS::subupper);
+    constrainGenericOp(*UpCopy);
+
+    Register Top8 = Builder.getMRI()->createGenericVirtualRegister(S8);
+    auto TopCopy = Builder.buildCopy(Top8, Src);
+    TopCopy->getOperand(1).setSubReg(MOS::subtop);
+    constrainGenericOp(*TopCopy);
+
+    auto HiMerge = Builder.buildMergeValues(Hi16, {Up8, Top8});
+    constrainGenericOp(*HiMerge);
+
+    MI.eraseFromParent();
+    return true;
+  }
+
+  // Handle 16-bit unmerge (Existing logic)
+  Register Lo = MI.getOperand(0).getReg();
+  Register Hi = MI.getOperand(1).getReg();
 
   MachineInstr *SrcMI = getDefIgnoringCopies(Src, *Builder.getMRI());
   std::optional<std::pair<Register, Register>> LoHi;
-  switch (SrcMI->getOpcode()) {
-  case MOS::G_FRAME_INDEX:
-    LoHi = selectFrameIndexLoHi(*SrcMI);
-    break;
-  case MOS::G_BLOCK_ADDR:
-  case MOS::G_GLOBAL_VALUE:
-    LoHi = selectAddrLoHi(*SrcMI);
-    break;
+  if (SrcMI) {
+    switch (SrcMI->getOpcode()) {
+    case MOS::G_FRAME_INDEX:
+      LoHi = selectFrameIndexLoHi(*SrcMI);
+      break;
+    case MOS::G_BLOCK_ADDR:
+    case MOS::G_GLOBAL_VALUE:
+      LoHi = selectAddrLoHi(*SrcMI);
+      break;
+    }
   }
+  
   MachineInstrBuilder LoCopy;
   MachineInstrBuilder HiCopy;
   if (LoHi) {
@@ -1958,6 +2086,17 @@ bool MOSInstructionSelector::selectBrIndirect(MachineInstr &MI) {
     Builder.buildInstr(MOS::LDImm, {XZero}, {INT64_C(0)});
     MI.addOperand(MachineOperand::CreateReg(XZero, false, true, true));
   }
+  
+  if (STI.hasW65816()) {
+      MachineIRBuilder Builder(MI);
+      // Use the new JMLIndir pseudo which accepts the 24-bit pointer register
+      auto JML = Builder.buildInstr(MOS::JMLIndir)
+          .addUse(MI.getOperand(0).getReg());
+      constrainSelectedInstRegOperands(*JML, TII, TRI, RBI);
+      MI.eraseFromParent();
+      return true;
+  }
+
   return selectGeneric(MI);
 }
 

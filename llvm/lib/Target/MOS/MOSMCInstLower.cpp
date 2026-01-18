@@ -728,6 +728,40 @@ void MOSMCInstLower::lower(const MachineInstr *MI, MCInst &OutMI) {
       return;
     }
   }
+case MOS::JML_Indirect16: {
+    // This instruction corresponds to "JML [addr]".
+    // If the operand is a register (Imag24/32), it means we are jumping indirect via that ZP register.
+    // We must emit the SYMBOL of the register (e.g. __rc2) as the operand, not the register index.
+    
+    OutMI.setOpcode(MOS::JML_Indirect16);
+    const MachineOperand &MO = MI->getOperand(0);
+    
+    if (MO.isReg()) {
+      Register Reg = MO.getReg();
+      const MOSRegisterInfo &TRI = *MI->getMF()->getSubtarget<MOSSubtarget>().getRegisterInfo();
+      
+      // Get the symbol name for the register (e.g., "__rc4")
+      // Note: We need the symbol for the LOW byte of the Imag24 register.
+      // RegisterInfo helpers handle this if we ask for the right thing.
+      
+      // Since Imag24 registers are aliases of RC registers, find the RC register.
+      // TRI.getName(Reg) returns "rl4" or similar. We need "__rc12" (if rl4 starts at rc12).
+      
+      // Use the helper logic we modified in MOSRegisterInfo.cpp/lowerOperand to get the symbol.
+      // We can reuse the logic by creating a temporary symbol operand.
+      
+      // Manually construct the symbol expression for the register
+      const MCExpr *Expr = MCSymbolRefExpr::create(
+          Ctx.getOrCreateSymbol(TRI.getImag8SymbolName(Reg)), Ctx);
+      OutMI.addOperand(MCOperand::createExpr(Expr));
+      return;
+    }
+    
+    // Fallback for non-register operands (e.g. immediate address)
+    MCOperand Op;
+    if (lowerOperand(MO, Op)) OutMI.addOperand(Op);
+    return;
+  }
   }
 
   // Handle any real instructions that weren't generated from a pseudo.
@@ -852,7 +886,8 @@ bool MOSMCInstLower::lowerOperand(const MachineOperand &MO, MCOperand &MCOp) {
       break;
     }
 
-    if (MOS::Imag16RegClass.contains(Reg) || MOS::Imag8RegClass.contains(Reg)) {
+    if (MOS::Imag16RegClass.contains(Reg) || MOS::Imag8RegClass.contains(Reg) ||
+        MOS::Imag24RegClass.contains(Reg)) {
       const MCExpr *Expr = MCSymbolRefExpr::create(
           Ctx.getOrCreateSymbol(TRI.getImag8SymbolName(Reg)), Ctx);
       MCOp = MCOperand::createExpr(Expr);

@@ -78,7 +78,7 @@ public:
   }
 
   bool enableMachineScheduler() const override { return true; }
-  bool enableSubRegLiveness() const override { return true; }
+  bool enableSubRegLiveness() const override { return false; }
 
   void overrideSchedPolicy(MachineSchedPolicy &Policy,
                            const SchedRegion &Region) const override;

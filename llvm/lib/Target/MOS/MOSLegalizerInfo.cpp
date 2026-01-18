@@ -65,8 +65,13 @@ MOSLegalizerInfo::MOSLegalizerInfo(const MOSSubtarget &STI) {
   LLT S16 = LLT::scalar(16);
   LLT S32 = LLT::scalar(32);
   LLT S64 = LLT::scalar(64);
-  LLT P = LLT::pointer(0, 16);
+  
+  bool IsW65816 = STI.hasW65816();
+  // Use 32-bit pointers for W65816 (hosting 24-bit values)
+  LLT P = LLT::pointer(0, IsW65816 ? 32 : 16);
   LLT PZ = LLT::pointer(1, 8);
+  // Scalar type matching the pointer size
+  LLT IntPtr = LLT::scalar(IsW65816 ? 32 : 16);
 
   // Constants
 
@@ -108,11 +113,11 @@ MOSLegalizerInfo::MOSLegalizerInfo(const MOSSubtarget &STI) {
   // Type Conversions
 
   getActionDefinitionsBuilder(G_INTTOPTR)
-      .legalFor({{P, S16}, {PZ, S8}})
+      .legalFor({{P, IntPtr}, {PZ, S8}})
       .scalarSameSizeAs(1, 0)
       .unsupported();
   getActionDefinitionsBuilder(G_PTRTOINT)
-      .legalFor({{S16, P}, {S8, PZ}})
+      .legalFor({{IntPtr, P}, {S8, PZ}})
       .scalarSameSizeAs(0, 1)
       .unsupported();
   getActionDefinitionsBuilder(G_ADDRSPACE_CAST)
@@ -124,10 +129,10 @@ MOSLegalizerInfo::MOSLegalizerInfo(const MOSSubtarget &STI) {
   getActionDefinitionsBuilder({G_EXTRACT, G_INSERT}).lower();
 
   getActionDefinitionsBuilder(G_MERGE_VALUES)
-      .legalForCartesianProduct({S16, P}, {S8, PZ})
+      .legalForCartesianProduct({IntPtr, P}, {S8, PZ})
       .unsupported();
-  getActionDefinitionsBuilder(G_UNMERGE_VALUES)
-      .legalForCartesianProduct({S8, PZ}, {S16, P})
+getActionDefinitionsBuilder(G_UNMERGE_VALUES)
+      .legalForCartesianProduct({S8, S16, PZ}, {IntPtr, P}) // Added S16
       .unsupported();
 
   getActionDefinitionsBuilder(G_BSWAP)
@@ -206,11 +211,11 @@ MOSLegalizerInfo::MOSLegalizerInfo(const MOSSubtarget &STI) {
       .unsupported();
 
   getActionDefinitionsBuilder(G_PTR_ADD)
-      .customFor({{P, S16}, {PZ, S8}})
+      .customFor({{P, IntPtr}, {PZ, S8}})
       .scalarSameSizeAs(1, 0)
       .unsupported();
   getActionDefinitionsBuilder(G_PTRMASK)
-      .customFor({{P, S16}, {PZ, S8}})
+      .customFor({{P, IntPtr}, {PZ, S8}})
       .scalarSameSizeAs(1, 0)
       .unsupported();
 
@@ -1245,8 +1250,29 @@ bool MOSLegalizerInfo::legalizeICmp(LegalizerHelper &Helper,
 
   // Compare pointers by first converting to integer. This allows the
   // comparison to be reduced to 8-bit comparisons.
+  const MOSSubtarget &STI = Builder.getMF().getSubtarget<MOSSubtarget>(); // Ensure STI is available
+
+
   if (Type.isPointer()) {
     LLT S = LLT::scalar(Type.getScalarSizeInBits());
+
+    // START FIX: Mask high byte for W65816 24-bit pointers (which use 32-bit registers)
+    if (STI.hasW65816() && S.getSizeInBits() == 32) {
+        auto LHSInt = Builder.buildPtrToInt(S, LHS);
+        auto RHSInt = Builder.buildPtrToInt(S, RHS);
+        
+        auto Mask = Builder.buildConstant(S, 0x00FFFFFF);
+        
+        auto LHSMasked = Builder.buildAnd(S, LHSInt, Mask);
+        auto RHSMasked = Builder.buildAnd(S, RHSInt, Mask);
+
+        Helper.Observer.changingInstr(MI);
+        MI.getOperand(2).setReg(LHSMasked.getReg(0));
+        MI.getOperand(3).setReg(RHSMasked.getReg(0));
+        Helper.Observer.changedInstr(MI);
+        return true;
+    }
+    // END FIX
 
     Helper.Observer.changingInstr(MI);
     MI.getOperand(2).setReg(Builder.buildPtrToInt(S, LHS).getReg(0));

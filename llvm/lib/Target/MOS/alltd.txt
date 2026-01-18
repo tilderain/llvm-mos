@@ -1,0 +1,4769 @@
+//===-- MOS.td - Describe the MOS Target Machine ----------*- tablegen -*-===//
+//
+// Part of LLVM-MOS, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===---------------------------------------------------------------------===//
+// This is the top level entry point for the MOS target.
+//===---------------------------------------------------------------------===//
+
+//===---------------------------------------------------------------------===//
+// Target-independent interfaces which we are implementing
+//===---------------------------------------------------------------------===//
+
+include "llvm/Target/Target.td"
+include "llvm/Target/GlobalISel/Combine.td"
+
+//===---------------------------------------------------------------------===//
+// MOS Device Definitions
+//===---------------------------------------------------------------------===//
+
+include "MOSFeatures.td"
+include "MOSDevices.td"
+include "MOSRegisterInfo.td"
+include "MOSRegisterBanks.td"
+include "MOSInstrInfo.td"
+include "MOSCombine.td"
+
+def MOSInstrInfo : InstrInfo {
+  let guessInstructionProperties = 0;
+}
+
+include "MOSCallingConv.td"
+
+def MOSAsmWriter : AsmWriter {
+ string AsmWriterClassName = "InstPrinter";
+ bit isMCAsmWriter = 1;
+}
+
+def MOSAsmParser : AsmParser {
+  let ShouldEmitMatchRegisterAltName = 1;
+  let ReportMultipleNearMisses = 0;
+  string RegisterPrefix = "";
+  string TokenizingCharacters = "#(),[]*!";
+}
+
+def MOSAsmParserVariantDefault : AsmParserVariant {
+  int Variant = 0;
+  let Name = "generic";
+}
+
+def MOSAsmParserVariantCA65 : AsmParserVariant {
+  int Variant = 1;
+  let Name = "ca65";
+}
+
+def MOSAsmParserVariantXA65 : AsmParserVariant {
+  int Variant = 2;
+  let Name = "xa65";
+}
+
+//===---------------------------------------------------------------------===//
+// Target Declaration
+//===---------------------------------------------------------------------===//
+
+def MOS : Target {
+  let InstructionSet         = MOSInstrInfo;
+  let AssemblyWriters        = [MOSAsmWriter];
+  let AllowRegisterRenaming = 1;
+
+  let AssemblyParsers        = [MOSAsmParser];
+  let AssemblyParserVariants = [MOSAsmParserVariantDefault,
+                                MOSAsmParserVariantCA65,
+                                MOSAsmParserVariantXA65];
+}
+
+defm : RemapAllTargetPseudoPointerOperands<Imag16>;//===-- MOSCallingConv.td - Calling Conventions MOS --------*- tablegen -*-===//
+//
+// Part of LLVM-MOS, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// This describes the calling conventions for the MOS architecture.
+//
+//===----------------------------------------------------------------------===//
+//
+// The C calling convention is mostly described inline. There are a few
+// additional points worth mentioning:
+//
+// - A, X, Y, C, N, V, Z, and RS1-RS9 are caller-saved. PC, S, D, I, RS0, and
+//   RS10-RS15 are callee-saved.
+//
+// - Aggregate types (structs, arrays, etc.) are passed by pointer. The pointer
+//   is managed entirely by the caller, and may or may not be on the soft stack.
+//   The callee is free to write to the memory; the caller must consider the
+//   memory overwritten by the call. This is handled directly by Clang; LLVM
+//   itself should never see aggregates.
+//
+// - Aggregate types are returned by a pointer passed as an implicit first
+//   argument. The resulting function returns void. This is handled directly by
+//   Clang; LLVM itself should never see aggregates.
+//
+// - Variable arguments (those within the ellipses of the argument list) are
+//   passed through the stack. Named arguments before the variable arguments are
+//   passed as usual: first in registers, then stack. Note that the variable
+//   argument and regular calling convention differ; thus, variable argument
+//   functions must only be called if prototyped. The C standard requires this,
+//   but many platforms do not; their variable argument and regular calling
+//   conventions are identical. A notable exception is Apple ARM64.
+//
+// - Values may be returned on the soft stack if insufficiently many registers
+//   are available. Callers must reserve sufficient space for this as they do
+//   for arguments. The space reserved for arguments may overlap freely with the
+//   space used for return values; thus only enough space for the larger of the
+//   two need be allocated.
+//
+// This calling convention was roughly based on that of RISC-V.
+//
+// For insight into the design of performant calling conventions, see the
+// following work by Davidson and Whalley. By their convention, this plaftorm
+// uses the "smarter hybrid" method, since LLVM performs both shrink wrapping
+// and caller save-restore placement optimizations, while using both
+// callee-saved and caller-saved registers when appropriate.
+//
+// Methods for Saving and Restoring Register Values across Function Calls
+// Software--Practice and Experience Vol 21(2), 149-165 (February 1991)
+// http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.14.4669&rep=rep1&type=pdf
+//
+//===----------------------------------------------------------------------===//
+
+let Entry = 1 in {
+def CC_MOS : CallingConv<[
+  CCIfType<[i1], CCPromoteToType<i8>>,
+
+  // Pointers are preferentially assigned to imaginary registers so indirect
+  // addressing modes work without additional copying.
+  //
+  // RS0 is skipped since it's the stack pointer.
+  CCIfPtr<CCAssignToReg<[RS1, RS2, RS3, RS4, RS5, RS6, RS7]>>,
+
+  // 8-bit values are assigned to A, then X, then the argument imaginary registers.
+  CCIfType<[i8], CCAssignToReg<[
+    A, X, RC2, RC3, RC4, RC5, RC6, RC7, RC8, RC9, RC10, RC11, RC12, RC13, RC14,
+    RC15
+  ]>>,
+
+  // Values that wouldn't fit anywhere else are passed directly on the stack.
+  CCAssignToStack<0, 1>,
+]>;
+
+// Calling convention for the variable section of a variadic function call.
+// Named arguments in such functions still use the above calling convention.
+def CC_MOS_VarArgs : CallingConv<[
+  CCIfType<[i1], CCPromoteToType<i8>>,
+
+  // All values are passed directly on the stack.
+  CCAssignToStack<0, 1>,
+]>;
+}
+
+// RS10-RS15 are callee-saved. These are represented implicitly by their
+// subregisters, since the subregisters are what must be saved and restored.
+def MOS_CSR : CalleeSavedRegs<(sequence "RC%u", 20, 31)>;
+
+// Interrupts save all registers except the stack pointers (which are restored
+// upon return by any function) and the flags (which are implicitly saved by the
+// interrupt).
+def MOS_Interrupt_CSR :
+  CalleeSavedRegs<(add A, X, Y, (sequence "RC%u", 2, 31))>;
+//===-- MOSCombine.td - Describe MOS combiner -------------*- tablegen -*-===//
+//
+// Part of LLVM-MOS, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===---------------------------------------------------------------------===//
+//
+// This file describes which combine operations are included in the MOS
+// combiner.
+//
+//===---------------------------------------------------------------------===//
+
+def fold_global_offset_matchdata : GIDefMatchData<"std::pair<const MachineOperand*, int64_t>">;
+def fold_global_offset : GICombineRule<
+  (defs root:$root, fold_global_offset_matchdata:$matchinfo),
+  (match (wip_match_opcode G_PTR_ADD):$root,
+          [{ return matchFoldGlobalOffset(*${root}, ${matchinfo}); }]),
+  (apply [{ applyFoldGlobalOffset(*${root}, ${matchinfo}); }])>;
+
+def sbc_equal : GICombineRule<
+  (defs root:$root),
+  (match (wip_match_opcode G_SBC):$root,
+          [{ return matchSBCEqual(*${root}); }]),
+  (apply [{ applySBCEqual(*${root}); }])>;
+
+def extract_low_bit_matchdata : GIDefMatchData<"MachineInstr*">;
+def extract_low_bit : GICombineRule<
+  (defs root:$root, extract_low_bit_matchdata:$matchinfo),
+  (match (wip_match_opcode G_TRUNC, G_ICMP):$root,
+          [{ return matchExtractLowBit(*${root}, ${matchinfo}); }]),
+  (apply [{ applyExtractLowBit(*${root}, ${matchinfo}); }])>;
+
+def uaddo_1 : GICombineRule<
+  (defs root:$root),
+  (match (wip_match_opcode G_UADDO):$root,
+          [{ return matchUAddO1(*${root}); }]),
+  (apply [{ applyUAddO1(*${root}); }])>;
+
+def cmpz_zero_matchdata : GIDefMatchData<"MachineOperand*">;
+def cmpz_zero : GICombineRule<
+  (defs root:$root, cmpz_zero_matchdata:$matchinfo),
+  (match (wip_match_opcode G_CMPZ):$root,
+          [{ return matchCMPZZero(*${root}, ${matchinfo}); }]),
+  (apply [{ applyCMPZZero(*${root}, ${matchinfo}); }])>;
+
+def load_store_to_memcpy_matchdata : GIDefMatchData<"GLoad*">;
+def load_store_to_memcpy : GICombineRule<
+  (defs root:$root, load_store_to_memcpy_matchdata:$matchinfo),
+  (match (wip_match_opcode G_STORE):$root,
+          [{ return matchLoadStoreToMemcpy(*${root}, ${matchinfo}); }]),
+  (apply [{ applyLoadStoreToMemcpy(*${root}, ${matchinfo}); }])>;
+
+def store_to_memset_matchdata : GIDefMatchData<"uint8_t">;
+def store_to_memset : GICombineRule<
+  (defs root:$root, store_to_memset_matchdata:$matchinfo),
+  (match (wip_match_opcode G_STORE):$root,
+          [{ return matchStoreToMemset(*${root}, ${matchinfo}); }]),
+  (apply [{ applyStoreToMemset(*${root}, ${matchinfo}); }])>;
+
+def fold_adde : GICombineRule<
+  (defs root:$root, build_fn_matchinfo:$matchinfo),
+  (match (wip_match_opcode G_UADDE, G_SADDE):$root,
+          [{ return matchFoldAddE(*${root}, ${matchinfo}); }]),
+  (apply [{ Helper.applyBuildFn(*${root}, ${matchinfo}); }])>;
+
+def fold_sbc : GICombineRule<
+  (defs root:$root, build_fn_matchinfo:$matchinfo),
+  (match (wip_match_opcode G_SBC):$root,
+          [{ return matchFoldShift(*${root}, ${matchinfo}); }]),
+  (apply [{ Helper.applyBuildFn(*${root}, ${matchinfo}); }])>;
+
+def fold_shift : GICombineRule<
+  (defs root:$root, build_fn_matchinfo:$matchinfo),
+  (match (wip_match_opcode G_SHLE, G_LSHRE):$root,
+          [{ return matchFoldShift(*${root}, ${matchinfo}); }]),
+  (apply [{ Helper.applyBuildFn(*${root}, ${matchinfo}); }])>;
+
+def shift_unused_carry_in : GICombineRule<
+  (defs root:$root, build_fn_matchinfo:$matchinfo),
+  (match (wip_match_opcode G_SHLE, G_LSHRE):$root,
+          [{ return matchShiftUnusedCarryIn(*${root}, ${matchinfo}); }]),
+  (apply [{ Helper.applyBuildFnNoErase(*${root}, ${matchinfo}); }])>;
+
+def mul_to_shift_and_add : GICombineRule<
+  (defs root:$root, build_fn_matchinfo:$matchinfo),
+  (match (wip_match_opcode G_MUL):$root,
+          [{ return matchMulToShiftAndAdd(*${root}, ${matchinfo}); }]),
+  (apply [{ Helper.applyBuildFnNoErase(*${root}, ${matchinfo}); }])>;
+
+def MOSCombiner : GICombiner<"MOSCombinerImpl", [
+  all_combines,
+  fold_global_offset,
+  extract_low_bit,
+  uaddo_1,
+  cmpz_zero,
+  load_store_to_memcpy,
+  store_to_memset,
+  fold_adde,
+  fold_sbc,
+  sbc_equal,
+  fold_shift,
+  shift_unused_carry_in,
+  mul_to_shift_and_add,
+]>;
+//===-- MOSDevices.td - MOS Devices -----------------------*- tablegen -*-===//
+//
+// Part of LLVM-MOS, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===---------------------------------------------------------------------===//
+// MOS Device Definitions
+//===---------------------------------------------------------------------===//
+
+def Feature6502
+    : SubtargetFeature<"mos-insns-6502", "Has6502Insns", "true",
+                       "The original documented 6502 instruction set">;
+
+def Feature6502BCD
+    : SubtargetFeature<"mos-insns-6502bcd", "Has6502BCDInsns", "true",
+                       "BCD instruction support, including SED and CLD (most "
+                       "6502 series CPUs support this)">;
+
+def Feature6502X
+    : SubtargetFeature<"mos-insns-6502x", "Has6502XInsns", "true",
+                       "The 'illegal' opcodes present on some early variants of "
+                       "the original 6502 processor">;
+
+def Feature65C02
+    : SubtargetFeature<"mos-insns-65c02", "Has65C02Insns", "true",
+                       "The new and modified instructions present on the generic "
+                       "65c02 and variants">;
+
+def FeatureR65C02
+    : SubtargetFeature<"mos-insns-r65c02", "HasR65C02Insns", "true",
+                       "The new and modified instructions present on Rockwell "
+                       "and WDC 65c02">;
+
+def FeatureW65C02
+    : SubtargetFeature<"mos-insns-w65c02", "HasW65C02Insns", "true",
+                       "The new and modified instructions present on "
+                       "WDC 65c02">;
+
+def FeatureW65816
+    : SubtargetFeature<"mos-insns-w65816", "HasW65816Insns", "true",
+                       "The new and modified instructions present on "
+                       "WDC 65816">;
+
+def Feature65EL02
+    : SubtargetFeature<"mos-insns-65el02", "Has65EL02Insns", "true",
+                       "The new and modified instructions present on "
+                       "65EL02">;
+
+def Feature65CE02
+    : SubtargetFeature<"mos-insns-65ce02", "Has65CE02Insns", "true",
+                       "The new and modified instructions present on "
+                       "65ce02 and variants">;
+
+def FeatureHUC6280
+    : SubtargetFeature<"mos-insns-huc6280", "HasHUC6280Insns", "true",
+                       "The new and modified instructions present on "
+                       "HuC6280">;
+
+def FeatureSWEET16
+    : SubtargetFeature<"mos-insns-sweet16", "HasSWEET16Insns", "true",
+                        "The SWEET16 instruction set">;
+
+def Feature65DTV02
+    : SubtargetFeature<"mos-insns-65dtv02", "Has65DTV02Insns", "true",
+                       "The new and modified instructions present on "
+                       "the C64DTV's 6502 variant">;
+
+def Feature4510
+    : SubtargetFeature<"mos-insns-4510", "Has4510Insns", "true",
+                        "The new instructions present on CSG 4510">;
+
+def Feature45GS02
+    : SubtargetFeature<"mos-insns-45gs02", "Has45GS02Insns", "true",
+                        "The new instructions present on 45GS02">;
+
+def FeatureSPC700
+    : SubtargetFeature<"mos-insns-spc700", "HasSPC700Insns", "true",
+                        "The SPC700 instruction set">;
+
+// A feature set aggregates features, grouping them. We don't want to create a
+// new member in MOSSubtarget (to store a value) for each set because we do not
+// care if the set is supported, only the subfeatures inside the set. We fix
+// this by simply setting the same dummy member for all feature sets, which is
+// then ignored.
+class FeatureSet<string name, string desc, list<SubtargetFeature> i>
+  : SubtargetFeature<name, "FeatureSetDummy", "true", desc, i>;
+
+// A family of microcontrollers, defining a set of supported features.
+class Family<string name, string desc, list<SubtargetFeature> i>
+  : FeatureSet<name, desc, i>;
+
+
+def Family6502
+    : Family<
+      "mos6502",
+      "Generic MOS 6502, with support for BCD instructions",
+      [Feature6502, Feature6502BCD, FeatureStaticStack]>;
+
+def Family6502X
+    : Family<"mos6502x",
+      "NMOS 6502, with illegal opcode support",
+      Family6502.Implies#[Feature6502X]>;
+
+def Family65C02
+    : Family<"mos65c02",
+      "Generic MOS 65C02",
+      Family6502.Implies#[Feature65C02]>;
+
+def FamilyR65C02
+    : Family<"mosr65c02",
+      "Rockwell 65C02",
+      Family65C02.Implies#[FeatureR65C02]>;
+
+def FamilyW65C02
+    : Family<"mosw65c02",
+      "WDC 65C02",
+      FamilyR65C02.Implies#[FeatureW65C02]>;
+
+// The WDC 65816 implements WDC 65C02 opcodes, but not Rockwell ones.
+def FamilyW65816
+    : Family<"mosw65816",
+      "WDC 65816",
+      Family65C02.Implies#[FeatureW65C02, FeatureW65816]>;
+
+def Family65EL02
+    : Family<"mos65el02",
+      "65EL02 virtual machine",
+      Family65C02.Implies#[FeatureW65C02, Feature65EL02]>;
+
+def Family65CE02
+    : Family<"mos65ce02",
+      "Commodore 65CE02",
+      FamilyR65C02.Implies#[Feature65CE02]>;
+
+def FamilyHUC6280
+    : Family<"moshuc6280",
+      "Hudson Soft HuC6280",
+      FamilyR65C02.Implies#[FeatureHUC6280]>;
+
+def FamilySWEET16
+    : Family<"mossweet16",
+      "MOS 6502 compatible with SWEET16 virtual machine support",
+      [FeatureSWEET16]>;
+
+def Family65DTV02
+    : Family<"mos65dtv02",
+      "The C64DTV's 6502 variant",
+      Family6502.Implies#[Feature65DTV02]>;
+
+def Family4510
+    : Family<"mos4510",
+      "CSG 4510",
+      Family65CE02.Implies#[Feature4510]>;
+
+def Family45GS02
+    : Family<"mos45gs02",
+      "45GS02",
+      Family4510.Implies#[Feature45GS02]>;
+
+def FamilySPC700
+    : Family<"mosspc700",
+      "Sony 6502-like CPUs, including the SPC700",
+      [FeatureSPC700]>;
+
+//===---------------------------------------------------------------------===//
+// MOS Families
+//===---------------------------------------------------------------------===//
+
+def MOSSchedModel : SchedMachineModel {
+  // Prevent instructions from being added to the pending queue, since latency
+  // doesn't matter. The remaining latency concerns are disabled in the C++
+  // scheduling strategy.
+  let MicroOpBufferSize = 1;
+  let CompleteModel = false;
+}
+
+class Device<string Name, Family Fam,
+             list<SubtargetFeature> ExtraFeatures = []>
+  : ProcessorModel<Name, MOSSchedModel, !listconcat([Fam],ExtraFeatures)>;
+
+def : Device<"mos6502",  Family6502>;
+def : Device<"mos6502x", Family6502X>;
+def : Device<"mos65c02", Family65C02>;
+def : Device<"mos65ce02", Family65CE02>;
+def : Device<"mosr65c02", FamilyR65C02>;
+def : Device<"mosw65c02", FamilyW65C02>;
+def : Device<"mosw65816", FamilyW65816>;
+def : Device<"mos65el02", Family65EL02>;
+def : Device<"moshuc6280", FamilyHUC6280>;
+def : Device<"mossweet16", FamilySWEET16>;
+def : Device<"mos65dtv02", Family65DTV02>;
+def : Device<"mos4510", Family4510>;
+def : Device<"mos45gs02", Family45GS02>;
+def : Device<"mosspc700", FamilySPC700>;
+//===-- MOSFeatures.td - MOS Features ---------------------*- tablegen -*-===//
+//
+// Part of LLVM-MOS, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===---------------------------------------------------------------------===//
+// MOS Features
+//===---------------------------------------------------------------------===//
+
+def FeatureAltRegisterNamesOnly
+    : SubtargetFeature<"mos-long-register-names", "LongRegisterNames",
+                        "true",
+                        "Requires llvm_mos_* prefixes to all registers. "#
+                        "Useful if your code has variable names that conflict "#
+                        "with llvm-mos register names">;
+
+def FeatureStaticStack :
+  SubtargetFeature<
+    "static-stack", "StaticStack", "true",
+    "Whether to use statically-allocated stack frames if possible.">;
+//===-- MOSInstrInfo.td - MOS Instruction Formats ----------*- tablegen -*-===//
+//
+// Part of LLVM-MOS, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// MOS Instruction Format Definitions.
+//
+//===----------------------------------------------------------------------===//
+
+/// Predicates. Useful for limiting instructions to particular hardware modes
+/// or particular hardware implementations.
+def Has6502 : Predicate<"Subtarget->has6502()">,
+              AssemblerPredicate<(all_of Feature6502), "6502"> {
+  let PredicateName = "Feature6502";
+}
+
+def Has6502X : Predicate<"Subtarget->has6502X()">,
+               AssemblerPredicate<(all_of Feature6502X), "6502X"> {
+  let PredicateName = "Feature6502X";
+}
+
+def Has65C02 : Predicate<"Subtarget->has65C02()">,
+               AssemblerPredicate<(all_of Feature65C02), "65C02"> {
+  let PredicateName = "Feature65C02";
+}
+
+def Has65CE02 : Predicate<"Subtarget->has65CE02()">,
+               AssemblerPredicate<(all_of Feature65CE02), "65CE02"> {
+  let PredicateName = "Feature65CE02";
+}
+
+def HasHUC6280 : Predicate<"Subtarget->hasHUC6280()">,
+               AssemblerPredicate<(all_of FeatureHUC6280), "HuC6280"> {
+  let PredicateName = "FeatureHUC6280";
+}
+
+def HasR65C02 : Predicate<"Subtarget->hasR65C02()">,
+               AssemblerPredicate<(all_of FeatureR65C02), "R65C02"> {
+  let PredicateName = "FeatureR65C02";
+}
+
+def HasW65C02 : Predicate<"Subtarget->hasW65C02()">,
+               AssemblerPredicate<(all_of FeatureW65C02), "W65C02"> {
+  let PredicateName = "FeatureW65C02";
+}
+
+def HasW65816Or65EL02 : Predicate<"(Subtarget->hasW65816() || Subtarget->has65EL02())">,
+                AssemblerPredicate<(any_of FeatureW65816, Feature65EL02), "W65816 or 65EL02"> {
+  let PredicateName = "FeatureW65816Or65EL02";
+}
+
+def HasW65816 : Predicate<"Subtarget->hasW65816()">,
+                AssemblerPredicate<(all_of FeatureW65816), "W65816"> {
+  let PredicateName = "FeatureW65816";
+}
+
+def Has65EL02 : Predicate<"Subtarget->has65EL02()">,
+                AssemblerPredicate<(all_of Feature65EL02), "65EL02"> {
+  let PredicateName = "Feature65EL02";
+}
+
+def Has6502XOrDTV : Predicate<"(Subtarget->has6502X() || Subtarget->has65DTV02())">,
+                AssemblerPredicate<(any_of Feature6502X, Feature65DTV02), "6502X (C64DTV subset)"> {
+  let PredicateName = "Feature6502XOrDTV";
+}
+
+def Has65DTV02 : Predicate<"Subtarget->has65DTV02()">,
+                AssemblerPredicate<(all_of Feature65DTV02), "6502 (C64DTV)"> {
+  let PredicateName = "Feature65DTV02";
+}
+
+def Has4510 : Predicate<"Subtarget->has4510()">,
+                AssemblerPredicate<(all_of Feature4510), "4510"> {
+  let PredicateName = "Feature4510";
+}
+
+def Has45GS02 : Predicate<"Subtarget->has45GS02()">,
+                AssemblerPredicate<(all_of Feature45GS02), "45GS02"> {
+  let PredicateName = "Feature45GS02";
+}
+
+def HasSPC700 : Predicate<"Subtarget->hasSPC700()">,
+               AssemblerPredicate<(all_of FeatureSPC700), "SPC700"> {
+  let PredicateName = "FeatureSPC700";
+}
+
+def HasBRA : Predicate<"Subtarget->hasBRA()">;
+def HasGPRStackRegs : Predicate<"Subtarget->hasGPRStackRegs()">;
+def HasGPRIncDec : Predicate<"Subtarget->hasGPRIncDec()">;
+def HasJMPIdxIndir : Predicate<"Subtarget->hasJMPIdxIndir()">;
+
+/// These instruction format definitions exist, thanks to Neil Parker's
+/// analysis of the 65xx instruction set, at:
+/// http://nparker.llx.com/a2/opcodes.html
+/// Parker's analysis is closely reflected in the structure of this file, and
+/// his words are quoted liberally herein.  Parker's sense-making of the 6502
+/// and family was critical in creating these format definitions, and we're
+/// indebted to him for the excellent analysis.
+
+/// The base MOS instruction class, from which all instructions descend.
+class Inst<string asmstr> : Instruction {
+  let Namespace = "MOS";
+
+  // None of the MC instructions are considered to have any output operands.
+  // Side-effects of the MC instructions
+  let OutOperandList = (outs);
+
+  let AsmString = asmstr;
+
+  // Note: These properties are not tracked for the real instruction set, which
+  // is used only in the MC layer. See the logical instruction set for the
+  // definitions of these properties.
+  let mayLoad = true;
+  let mayStore = true;
+  let hasSideEffects = true;
+
+  let DecoderNamespace = "MOS";
+
+  bit MLow = 0;
+  bit MHigh = 0;
+  bit XLow = 0;
+  bit XHigh = 0;
+  let TSFlags{0} = MLow;
+  let TSFlags{1} = MHigh;
+  let TSFlags{2} = XLow;
+  let TSFlags{3} = XHigh;
+}
+
+class InstConditionalBranch {
+  bit isBranch = true;
+  bit isTerminator = true;
+}
+
+class InstUnconditionalBranch : InstConditionalBranch {
+  bit isBarrier = true;
+}
+
+class InstCall {
+  bit isCall = true;
+}
+
+class InstReturn {
+  bit isBarrier = true;
+  bit isReturn = true;
+  bit isTerminator = true;
+}
+
+/// Makes sure that immediate mode operands fit into the required bit field
+/// size.  See also *isImm8 functions in MOS code.
+class MOSAsmOperand<string name> : AsmOperandClass {
+  let Name = name;
+  let DiagnosticType = !strconcat("Invalid", name);
+}
+
+class ImmediateAsmOperand<string name> : MOSAsmOperand<name> {
+    let RenderMethod = "addImmOperands";
+    let DiagnosticType = "immediate";
+  }
+
+class PCRelativeOperand<string name> : MOSAsmOperand<name>;
+
+/// An 8-bit (i.e. zero page) address.
+class Addr8Operand<string name> : MOSAsmOperand<name>;
+
+/// A 16-bit address.
+class Addr16Operand<string name> : MOSAsmOperand<name>;
+
+/// A 24-bit address.
+class Addr24Operand<string name> : MOSAsmOperand<name>;
+
+/// This operand will only match a value from 0 to 7 inclusive.
+def imm3 : Operand<i32> {
+  let ParserMatchClass = ImmediateAsmOperand<"Imm3">;
+  let DecoderMethod = "decodeUImmOperand<3>";
+  let OperandType = "OPERAND_IMM3";
+  let OperandNamespace = "MOSOp";
+  let Type = i8;
+}
+
+/// This operand will only match a value from 0 to 15 inclusive.
+def imm4 : Operand<i32> {
+  let ParserMatchClass = ImmediateAsmOperand<"Imm4">;
+  let DecoderMethod = "decodeUImmOperand<4>";
+  let OperandType = "OPERAND_IMM4";
+  let OperandNamespace = "MOSOp";
+  let Type = i8;
+}
+
+/// This operand will only match a value from 0 to 255 inclusive.
+class imm8at<int offset> : Operand<i32> {
+  let ParserMatchClass = ImmediateAsmOperand<"Imm8">;
+  let EncoderMethod = "encodeImm<MOS::Imm8, " # offset # ">";
+  let DecoderMethod = "decodeUImmOperand<8>";
+  let OperandType = "OPERAND_IMM8";
+  let OperandNamespace = "MOSOp";
+  let Type = i8;
+}
+def imm8 : imm8at<1>;
+def imm8at2 : imm8at<2>;
+
+/// This operand will only match a value from 0 to 65535 inclusive.
+class imm16at<int offset> : Operand<i32> {
+  let ParserMatchClass = ImmediateAsmOperand<"Imm16">;
+  let EncoderMethod = "encodeImm<MOS::Imm16, " # offset # ">";
+  let DecoderMethod = "decodeUImmOperand<16>";
+  let OperandType = "OPERAND_IMM16";
+  let OperandNamespace = "MOSOp";
+  let Type = i16;
+}
+def imm16 : imm16at<1>;
+def imm16at5 : imm16at<5>;
+
+/// An 8-bit pc-relative reference, for branch instructions.
+class pcrel8at<int offset> : Operand<i32> {
+  let ParserMatchClass = PCRelativeOperand<"PCRel8">;
+  let EncoderMethod = "encodeImm<MOS::PCRel8, " # offset # ">";
+  let DecoderMethod = "decodeSImmOperand<8>";
+  let PrintMethod = "printBranchOperand";
+  let OperandType = "OPERAND_PCREL";
+}
+def pcrel8 : pcrel8at<1>;
+def pcrel8at2 : pcrel8at<2>;
+
+/// A 16-bit pc-relative reference, for 65816 BRL instruction.
+class pcrel16at<int offset> : Operand<i32> {
+  let ParserMatchClass = PCRelativeOperand<"PCRel16">;
+  let EncoderMethod = "encodeImm<MOS::PCRel16, " # offset # ">";
+  let DecoderMethod = "decodeSImmOperand<16>";
+  let PrintMethod = "printBranchOperand";
+  let OperandType = "OPERAND_PCREL";
+}
+def pcrel16 : pcrel16at<1>;
+
+class addr8at<int offset> : Operand<i32> {
+  let ParserMatchClass = Addr8Operand<"Addr8">;
+  let EncoderMethod = "encodeImm<MOS::Addr8, " # offset # ">";
+  let DecoderMethod = "decodeAddr8Operand";
+  let OperandType = "OPERAND_ADDR8";
+  let OperandNamespace = "MOSOp";
+  let Type = i8;
+}
+def addr8 : addr8at<1>;
+def addr8at2 : addr8at<2>;
+def addr8at3 : addr8at<3>;
+def addr8at4 : addr8at<4>;
+
+class addr16at<int offset> : Operand<i32> {
+  let ParserMatchClass = Addr16Operand<"Addr16">;
+  let EncoderMethod = "encodeImm<MOS::Addr16, " # offset # ">";
+  let DecoderMethod = "decodeUImmOperand<16>";
+  let OperandType = "OPERAND_ADDR16";
+  let OperandNamespace = "MOSOp";
+  let Type = i16;
+}
+def addr16 : addr16at<1>;
+def addr16at2 : addr16at<2>;
+def addr16at3 : addr16at<3>;
+
+class addr24at<int offset> : Operand<i32> {
+  let ParserMatchClass = Addr24Operand<"Addr24">;
+  let EncoderMethod = "encodeImm<MOS::Addr24, " # offset # ">";
+  let DecoderMethod = "decodeUImmOperand<24>";
+  let OperandType = "OPERAND_ADDR24";
+  let OperandNamespace = "MOSOp";
+}
+def addr24 : addr24at<1>;
+
+/// All non-virtual MOS opcodes are 8 bits long.
+class Opcode<bits<8> opcode = 0> {
+  bits<8> op = opcode;
+}
+def DefaultOpcode : Opcode<0>;
+
+/// Per Parker, opcodes on the MOS series tend to fit into the pattern aaabbbcc
+/// where bbb is the addressing mode, and aaacc describe the instruction in
+/// question. This is not a fixed rule however, especially for later processors
+/// in the MOS series.
+/// Parker: "Most instructions that explicitly reference memory locations have
+/// bit patterns of the form aaabbbcc. The aaa and cc bits determine the
+/// opcode, and the bbb bits determine the addressing mode."
+class OpcodeABC<bits<3> aaa = 0, bits<3> bbb = 0, bits<2> cc = 0> : Opcode<0> {
+  let op{7-5} = aaa;
+  let op{4-2} = bbb;
+  let op{1-0} = cc;
+}
+
+/// Instructions tend to break down into similar addressing modes by the cc
+/// bits. So we deal with base instruction classes in four groups.
+class OpcodeC0<bits<3> aaa = 0, bits<3> bbb = 0> : OpcodeABC<aaa, bbb, 0b00>;
+class OpcodeC1<bits<3> aaa = 0, bits<3> bbb = 0> : OpcodeABC<aaa, bbb, 0b01>;
+class OpcodeC2<bits<3> aaa = 0, bits<3> bbb = 0> : OpcodeABC<aaa, bbb, 0b10>;
+class OpcodeC3<bits<3> aaa = 0, bits<3> bbb = 0> : OpcodeABC<aaa, bbb, 0b11>;
+
+/// Addressing modes
+/// ----------------
+/// Addressing modes on 65xx do not perfectly map to bit fields across all
+/// instructions. So we define the concepts of the addressing modes here, and
+/// define how the operands should be parsed per addressing mode.
+/// I wrote the operands in the a i r y format because tablegen seems to like
+/// to collapse multiple characters into one token if they are not separated
+/// by spaces.  We'll remove those spaces when we print out the operands for
+/// any instruction. See also MOSInstPrinter.cpp.
+class AddressingMode {
+  string OperandsStr = ?;
+  dag InOperandList = ?;
+}
+
+def Implicit : AddressingMode {
+  string OperandsStr = "";
+  dag InOperandList = (ins);
+}
+
+def Accumulator : AddressingMode {
+  string OperandsStr = "";
+  dag InOperandList = (ins);
+}
+
+def Immediate : AddressingMode {
+  let OperandsStr = "#$param";
+  let InOperandList = (ins imm8:$param);
+}
+
+def Immediate16 : AddressingMode {
+  let OperandsStr = "#$param";
+  let InOperandList = (ins imm16:$param);
+}
+
+def ZeroPage : AddressingMode {
+  let OperandsStr = "$param";
+  let InOperandList = (ins addr8:$param);
+}
+
+def ZeroPageX : AddressingMode {
+  let OperandsStr = "$param , x";
+  let InOperandList = (ins addr8:$param);
+}
+
+def ZeroPageY : AddressingMode {
+  let OperandsStr = "$param , y";
+  let InOperandList = (ins addr8:$param);
+}
+
+def Relative : AddressingMode {
+  let OperandsStr = "$param";
+  let InOperandList = (ins pcrel8:$param);
+}
+
+def Relative16 : AddressingMode {
+  let OperandsStr = "$param";
+  let InOperandList = (ins pcrel16:$param);
+}
+
+def Absolute : AddressingMode {
+  let OperandsStr = "$param";
+  let InOperandList = (ins addr16:$param);
+}
+
+def AbsoluteLong : AddressingMode {
+  let OperandsStr = "$param";
+  let InOperandList = (ins addr24:$param);
+}
+
+def AbsoluteX : AddressingMode {
+  let OperandsStr = "$param , x";
+  let InOperandList = (ins addr16:$param);
+}
+
+def AbsoluteXLong : AddressingMode {
+  let OperandsStr = "$param , x";
+  let InOperandList = (ins addr24:$param);
+}
+
+def AbsoluteY : AddressingMode {
+  let OperandsStr = "$param , y";
+  let InOperandList = (ins addr16:$param);
+}
+
+def Indirect : AddressingMode {
+  let OperandsStr = "( $param )";
+  let InOperandList = (ins addr8:$param);
+}
+
+def Indirect16 : AddressingMode {
+  let OperandsStr = "( $param )";
+  let InOperandList = (ins addr16:$param);
+}
+
+def IndexedIndirect16 : AddressingMode {
+  let OperandsStr = "( $param , x )";
+  let InOperandList = (ins addr16:$param);
+}
+
+def IndirectLong : AddressingMode {
+  let OperandsStr = "[ $param ]";
+  let InOperandList = (ins addr8:$param);
+}
+
+def IndexedIndirect : AddressingMode {
+  let OperandsStr = "( $param , x )";
+  let InOperandList = (ins addr8:$param);
+}
+
+def IndirectIndexed : AddressingMode {
+  let OperandsStr = "( $param ) , y";
+  let InOperandList = (ins addr8:$param);
+}
+
+def IndirectIndexedLong : AddressingMode {
+  let OperandsStr = "[ $param ] , y";
+  let InOperandList = (ins addr8:$param);
+}
+
+def IndirectIndexedLongZ : AddressingMode {
+  let OperandsStr = "[ $param ] , z";
+  let InOperandList = (ins addr8:$param);
+}
+
+def IndirectZeroPageZ : AddressingMode {
+  let OperandsStr = "( $param ) , z";
+  let InOperandList = (ins addr8:$param);
+}
+
+def StackRelative : AddressingMode {
+  let OperandsStr = "$param , s";
+  let InOperandList = (ins addr8:$param);
+}
+
+def IndirectStackRelativeY : AddressingMode {
+  let OperandsStr = "( $param , s ) , y";
+  let InOperandList = (ins addr8:$param);
+}
+
+def RStackRelative : AddressingMode {
+  let OperandsStr = "$param , r";
+  let InOperandList = (ins addr8:$param);
+}
+
+def IndirectRStackRelativeY : AddressingMode {
+  let OperandsStr = "( $param , r ) , y";
+  let InOperandList = (ins addr8:$param);
+}
+
+def ZeroPageAt2 : AddressingMode {
+  let OperandsStr = "$param";
+  let InOperandList = (ins addr8at2:$param);
+}
+
+def ZeroPageXAt2 : AddressingMode {
+  let OperandsStr = "$param , x";
+  let InOperandList = (ins addr8at2:$param);
+}
+
+def AbsoluteAt2 : AddressingMode {
+  let OperandsStr = "$param";
+  let InOperandList = (ins addr16at2:$param);
+}
+
+def AbsoluteXAt2 : AddressingMode {
+  let OperandsStr = "$param , x";
+  let InOperandList = (ins addr16at2:$param);
+}
+
+/// An unsized MOS instruction, to which an addressing mode may be applied.
+class InstAddressMode<string asmstr, Opcode op = DefaultOpcode,
+                      AddressingMode mode = Implicit> : Inst<asmstr> {
+  Opcode opcode = op;
+  let InOperandList = mode.InOperandList;
+  string OperandsStr;
+  let OperandsStr = mode.OperandsStr;
+}
+
+/// An 8 bit real MOS instruction.
+class Inst8<string asmstr, Opcode op = DefaultOpcode,
+            AddressingMode mode = Implicit> :
+    InstAddressMode<asmstr, op, mode> {
+  let Size = 1;
+  bits<8> Inst;
+  let Inst{7-0} = opcode.op;
+}
+
+/// A 16 bit real MOS instruction.  Always an 8 bit opcode and an 8 bit
+/// operand.
+class Inst16<string opcodestr, Opcode op = DefaultOpcode,
+             AddressingMode mode = Implicit> :
+    InstAddressMode<opcodestr, op, mode> {
+  let Size = 2;
+  bits<8> param;
+  bits<16> Inst;
+  let Inst{7-0} = opcode.op;
+  let Inst{15-8} = param;
+  let AsmString = opcodestr # " " # mode.OperandsStr;
+}
+
+/// A 24 bit real MOS instruction. Always an 8 bit opcode and a 16 bit
+/// operand.
+class Inst24<string opcodestr, Opcode op = DefaultOpcode,
+             AddressingMode mode = Implicit> :
+    InstAddressMode<opcodestr, op, mode> {
+  let Size = 3;
+  bits<16> param;
+  bits<24> Inst;
+  let Inst{7-0} = opcode.op;
+  let Inst{23-8} = param;
+  let AsmString = opcodestr # " " # mode.OperandsStr;
+}
+
+/// A 32 bit real 65816 instruction. Always an 8 bit opcode and a 24 bit
+/// operand.
+class Inst32<string opcodestr, Opcode op = DefaultOpcode,
+             AddressingMode mode = Implicit> :
+    InstAddressMode<opcodestr, op, mode> {
+  let Size = 4;
+  bits<24> param;
+  bits<32> Inst;
+  let Inst{7-0} = opcode.op;
+  let Inst{31-8} = param;
+  let AsmString = opcodestr # " " # mode.OperandsStr;
+}
+
+/// A 24 bit immediate prefixed HuC6280 instruction.
+/// Always an 8 bit opcode, an 8 bit immediate and an 8 bit operand.
+class InstImmediate24<string opcodestr, Opcode op = DefaultOpcode,
+             AddressingMode mode = Implicit> :
+    InstAddressMode<opcodestr, op, mode> {
+  let Size = 3;
+  bits<8> imm;
+  bits<8> param;
+  bits<24> Inst;
+
+  Opcode opcode = op;
+  let InOperandList = !con((ins imm8:$imm), mode.InOperandList);
+  string OperandsStr;
+  let OperandsStr = "#$imm , " # mode.OperandsStr;
+
+  let Inst{7-0} = opcode.op;
+  let Inst{15-8} = imm;
+  let Inst{23-16} = param;
+  let AsmString = opcodestr # " " # OperandsStr;
+}
+
+/// A 32 bit immediate prefixed HuC6280 instruction.
+/// Always an 8 bit opcode, an 8 bit immediate and a 16 bit operand.
+class InstImmediate32<string opcodestr, Opcode op = DefaultOpcode,
+             AddressingMode mode = Implicit> :
+    InstAddressMode<opcodestr, op, mode> {
+  let Size = 4;
+  bits<8> imm;
+  bits<16> param;
+  bits<32> Inst;
+
+  Opcode opcode = op;
+  let InOperandList = !con((ins imm8:$imm), mode.InOperandList);
+  string OperandsStr;
+  let OperandsStr = "#$imm , " # mode.OperandsStr;
+
+  let Inst{7-0} = opcode.op;
+  let Inst{15-8} = imm;
+  let Inst{31-16} = param;
+  let AsmString = opcodestr # " " # OperandsStr;
+}
+
+/// A R65C02 bit branch instruction.
+class InstBitBranch<string opcodestr, Opcode op = DefaultOpcode> :
+    Inst<opcodestr>, InstConditionalBranch {
+  let Size = 3;
+  bits<24> Inst;
+  bits<3> tbit;
+  bits<8> source;
+  bits<8> location;
+
+  Opcode opcode = op;
+  let InOperandList = (ins imm3:$tbit, addr8:$source, pcrel8at2:$location);
+  string OperandsStr;
+  let OperandsStr = "$tbit , $source , $location";
+
+  let Inst{7} = opcode.op{7};
+  let Inst{6-4} = tbit;
+  let Inst{3-0} = opcode.op{3-0};
+  let Inst{15-8} = source;
+  let Inst{23-16} = location;
+  let AsmString = opcodestr # " " # OperandsStr;
+}
+
+/// A R65C02 bit modify instruction.
+class InstBitModify<string opcodestr, Opcode op = DefaultOpcode,
+                    AddressingMode mode = Implicit> :
+    InstAddressMode<opcodestr, op, mode> {
+  let Size = 2;
+  bits<8> param;
+  bits<16> Inst;
+  bits<3> tbit;
+
+  Opcode opcode = op;
+  let InOperandList = !con((ins imm3:$tbit), mode.InOperandList);
+  string OperandsStr;
+  let OperandsStr = "$tbit , " # mode.OperandsStr;
+
+  let Inst{7} = opcode.op{7};
+  let Inst{6-4} = tbit;
+  let Inst{3-0} = opcode.op{3-0};
+  let Inst{15-8} = param;
+  let AsmString = opcodestr # " " # OperandsStr;
+}
+
+/// 45GS02: NOP prefixed opcode with 8-bit address operand (flat memory access)
+class Inst4502Nop16<string opcodestr, Opcode op = DefaultOpcode, AddressingMode mode = IndirectIndexedLongZ> :
+    Inst<opcodestr> {
+  let Size = 3;
+  bits<24> Inst;
+  bits<8> param;
+
+  Opcode opcode = op;
+  let InOperandList = (ins addr8at2:$param);
+
+  let Inst{7-0} = 0xea; // NOP
+  let Inst{15-8} = opcode.op;
+  let Inst{23-16} = param;
+  let AsmString = opcodestr # " " # mode.OperandsStr;
+}
+
+/// 45GS02: NEG NEG prefixed opcode with 8-bit address operand
+class Inst4502NegNeg8<string opcodestr, Opcode op = DefaultOpcode, AddressingMode mode = ZeroPageX> :
+    Inst<opcodestr> {
+  let Size = 4;
+  bits<32> Inst;
+  bits<8> param;
+
+  Opcode opcode = op;
+  let InOperandList = (ins addr8at3:$param);
+  let Inst{7-0} = 0x42;  // NEG
+  let Inst{15-8} = 0x42; // NEG
+  let Inst{23-16} = opcode.op;
+  let Inst{31-24} = param;
+  let AsmString = opcodestr # " " # mode.OperandsStr;
+}
+
+/// 45GS02: NEG NEG prefixed opcode; no operand
+class Inst4502NegNegImplicit<string opcodestr, Opcode op = DefaultOpcode, AddressingMode mode = Implicit> :
+    Inst<opcodestr> {
+  let Size = 3;
+  bits<24> Inst;
+  let InOperandList = mode.InOperandList;
+
+  Opcode opcode = op;
+  let Inst{7-0} = 0x42;  // NEG
+  let Inst{15-8} = 0x42; // NEG
+  let Inst{23-16} = opcode.op;
+  let AsmString = opcodestr;
+}
+
+/// 45GS02: NEG NEG prefixed opcode with 16-bit address operand
+class Inst4502NegNeg16<string opcodestr, Opcode op = DefaultOpcode, AddressingMode mode = AbsoluteX> :
+    Inst<opcodestr> {
+  let Size = 5;
+  bits<40> Inst;
+  bits<16> param;
+
+  Opcode opcode = op;
+  let InOperandList = (ins addr16at3:$param);
+
+  let Inst{7-0} = 0x42;  // NEG
+  let Inst{15-8} = 0x42; // NEG
+  let Inst{23-16} = opcode.op;
+  let Inst{39-24} = param;
+  let AsmString = opcodestr # " " # mode.OperandsStr;
+}
+
+/// 45GS02: NEG NEG NOP prefixed opcode with 8-bit address operand
+class Inst4502NegNegNop8<string opcodestr, Opcode op = DefaultOpcode, AddressingMode mode = IndirectLong> :
+    Inst<opcodestr> {
+  let Size = 5;
+  bits<40> Inst;
+  bits<8> param;
+
+  Opcode opcode = op;
+  let InOperandList = (ins addr8at4:$param);
+
+  let Inst{7-0} = 0x42;  // NEG
+  let Inst{15-8} = 0x42; // NEG
+  let Inst{23-16} = 0xea;// NOP
+  let Inst{31-24} = opcode.op;
+  let Inst{39-32} = param;
+  let AsmString = opcodestr # " " # mode.OperandsStr;
+}
+
+/// A HuC6280 block instruction.
+class InstHuCBlockMove<string opcodestr, Opcode op = DefaultOpcode> :
+    Inst<opcodestr> {
+  let Size = 7;
+  bits<56> Inst;
+  bits<16> bsource;
+  bits<16> bdest;
+  bits<16> blength;
+
+  Opcode opcode = op;
+  let InOperandList = (ins addr16:$bsource, addr16at3:$bdest, imm16at5:$blength);
+  string OperandsStr;
+  let OperandsStr = "$bsource , $bdest , #$blength";
+
+  let Inst{7-0} = opcode.op;
+  let Inst{23-8} = bsource;
+  let Inst{39-24} = bdest;
+  let Inst{55-40} = blength;
+  let AsmString = opcodestr # " " # OperandsStr;
+}
+
+/// A 65816 memory move instruction.
+class Inst816MemoryMove<string opcodestr, Opcode op = DefaultOpcode> :
+    Inst<opcodestr> {
+  let Size = 3;
+  bits<24> Inst;
+  bits<8> sourceBank;
+  bits<8> destinationBank;
+
+  Opcode opcode = op;
+  let InOperandList = (ins imm8:$sourceBank, imm8at2:$destinationBank);
+  string OperandsStr;
+  let OperandsStr = "#$sourceBank , #$destinationBank";
+
+  let Inst{7-0} = opcode.op;
+  let Inst{15-8} = sourceBank;
+  let Inst{23-16} = destinationBank;
+  let AsmString = opcodestr # " " # OperandsStr;
+}
+
+/// Some one-byte opcodes tend to have fixed lower 4 bits, and vary in the
+/// higher four bits.
+class InstNybble<string asmstr, bits<4> low = 0, bits<4> high = 0> :
+    Inst8<asmstr> {
+  let Inst{7-4} = high;
+  let Inst{3-0} = low;
+}
+
+/// Instructions where the low nybble is 0x0.
+class InstLow0<string asmstr, bits<4> high = 0> : InstNybble<asmstr, 0x0, high>;
+/// Instructions where the low nybble is 0x2.
+class InstLow2<string asmstr, bits<4> high = 0> : InstNybble<asmstr, 0x2, high>;
+/// Instructions where the low nybble is 0x3.
+class InstLow3<string asmstr, bits<4> high = 0> : InstNybble<asmstr, 0x3, high>;
+/// Instructions where the low nybble is 0x4.
+class InstLow4<string asmstr, bits<4> high = 0> : InstNybble<asmstr, 0x4, high>;
+/// Instructions where the low nybble is 0x8.
+class InstLow8<string asmstr, bits<4> high = 0> : InstNybble<asmstr, 0x8, high>;
+/// Instructions where the low nybble is 0xa.
+class InstLowA<string asmstr, bits<4> high = 0> : InstNybble<asmstr, 0xa, high>;
+/// Instructions where the low nybble is 0xb.
+class InstLowB<string asmstr, bits<4> high = 0> : InstNybble<asmstr, 0xb, high>;
+
+
+/// Opcode groups based on cc
+/// -------------------------
+
+/// OpcodeC1 class instructions
+/// "Because the cc = 01 instructions are relatively regular, we sketch them
+/// out first."
+multiclass CC1_NoImmediate<bits<3> aaa, string OpcodeStr = "nop", list<Predicate> preds = []> {
+/// For cc = 01, then the meaning of bbb is:
+/// 000	(zero page,X)
+/// 001	zero page
+/// 010	#immediate
+/// 011	absolute
+/// 100	(zero page),Y
+/// 101	zero page,X
+/// 110	absolute,Y
+/// 111	absolute,X
+  let Predicates = preds in {
+    def _IndexedIndirect :
+      Inst16<OpcodeStr, OpcodeC1< aaa, 0b000>, IndexedIndirect>;
+
+    def _ZeroPage :
+      Inst16<OpcodeStr, OpcodeC1< aaa, 0b001>, ZeroPage>;
+
+    /// "The only irregularity is the absence of the nonsensical immediate STA
+    /// instruction."
+    /// skip immediate instruction types here for 0b010
+
+    def _Absolute :
+      Inst24<OpcodeStr, OpcodeC1<aaa, 0b011>, Absolute>;
+
+    def _IndirectIndexed :
+      Inst16<OpcodeStr, OpcodeC1<aaa, 0b100>, IndirectIndexed>;
+
+    def _ZeroPageX :
+      Inst16<OpcodeStr, OpcodeC1<aaa, 0b101>, ZeroPageX>;
+
+    def _AbsoluteY :
+      Inst24<OpcodeStr, OpcodeC1<aaa, 0b110>, AbsoluteY>;
+
+    def _AbsoluteX :
+      Inst24<OpcodeStr, OpcodeC1<aaa, 0b111>, AbsoluteX>;
+  }
+
+/// For cc = 10 on 65C02 and 65816, then the meaning of bbb is:
+/// 100	(zero page)
+/// For cc = 11 on 65816, then the meaning of bbb is:
+/// 000 (stack pointer)
+/// 001	[zero page]
+/// 011	absolute long
+/// 100 (stack pointer),Y
+/// 101	[zero page],Y
+/// 111	absolute long,X
+  let Predicates = preds # [HasW65816Or65EL02] in {
+    def _StackRelative :
+      Inst16<OpcodeStr, OpcodeC3<aaa, 0b000>, StackRelative>;
+
+    def _IndirectStackRelativeY :
+      Inst16<OpcodeStr, OpcodeC3<aaa, 0b100>, IndirectStackRelativeY>;
+  }
+
+  let Predicates = preds # [Has65C02] in {
+    def _Indirect :
+      Inst16<OpcodeStr, OpcodeC2<aaa, 0b100>, Indirect>;
+  }
+  
+  let Predicates = preds # [HasW65816] in {
+    let DecoderNamespace = "w65816" in {
+      def _IndirectLong :
+        Inst16<OpcodeStr, OpcodeC3<aaa, 0b001>, IndirectLong>;
+
+      def _AbsoluteLong :
+        Inst32<OpcodeStr, OpcodeC3<aaa, 0b011>, AbsoluteLong>;
+
+      def _IndirectIndexedLong :
+        Inst16<OpcodeStr, OpcodeC3<aaa, 0b101>, IndirectIndexedLong>;
+
+      def _AbsoluteXLong :
+        Inst32<OpcodeStr, OpcodeC3<aaa, 0b111>, AbsoluteXLong>;
+    }
+  }
+
+  let Predicates = preds # [Has65EL02] in {
+    let DecoderNamespace = "65el02" in {
+      def _RStackRelative :
+        Inst16<OpcodeStr, OpcodeC3<aaa, 0b001>, RStackRelative>;
+
+      def _RIndirectStackRelativeY :
+        Inst16<OpcodeStr, OpcodeC3<aaa, 0b101>, IndirectRStackRelativeY>;
+    }
+  }
+}
+
+/// All cc=01 instruction types, for the majority of opcodes where cc == 01.
+multiclass CC1_All<bits<3> aaa, string OpcodeStr = "nop", list<Predicate> preds = []> :
+    CC1_NoImmediate<aaa, OpcodeStr, preds> {
+  // handle immediate CC1 instruction types here for opcodes that fit the
+  // CC1 pattern
+  def _Immediate : Inst16<OpcodeStr, OpcodeC1< aaa, 0b010 >, Immediate> {
+    let Predicates = preds;
+    let MHigh = 1;
+  }
+
+  // 16-bit immediate operand on 65816 when M flag is low.
+  def _Immediate16 : Inst24<OpcodeStr, OpcodeC1< aaa, 0b010 >, Immediate16> {
+    let Predicates = preds # [HasW65816Or65EL02];
+    let DecoderNamespace = "MOSMLow";
+    let MLow = 1;
+  }
+}
+
+/// "Next we consider the cc = 10 instructions. These have a completely
+/// different set of opcodes:
+///
+/// aaa opcode
+/// 000 ASL
+/// 001 ROL
+/// 010 LSR
+/// 011 ROR
+/// 100 STX
+/// 101 LDX
+/// 110 DEC
+/// 111 INC
+///
+/// The addressing modes are similar to the 01 case, but not quite the same:
+/// bbb	addressing mode
+/// 000 #immediate
+/// 001 zero page
+/// 010 accumulator
+/// 011 absolute
+/// 101 zero page,X
+/// 111 absolute,X
+/// Note that bbb = 100 and 110 are missing. Also, with STX and LDX,
+/// "zero page,X" addressing becomes "zero page,Y", and with LDX, "absolute,X"
+/// becomes "absolute,Y".
+///
+/// These fit together like this:"
+///
+///             ASL ROL LSR ROR STX LDX DEC INC
+/// #                               A2
+/// zp          06  26  46  66  86  A6  C6  E6
+/// A           0A  2A  4A  6A
+/// abs         0E  2E  4E  6E  8E  AE  CE  EE
+/// zp,X/zp,    16  36  56  76  96  B6  D6  F6
+/// abs,X/abs,Y	1E	3E	5E	7E      BE  DE  FE
+///
+/// "
+
+/// This multiclass covers ASL, ROL, LSR and ROR instructions in the
+/// chart above.
+multiclass CC2_Shift<bits<3> aaa, string OpcodeStr = "nop"> {
+  def _ZeroPage : Inst16<OpcodeStr, OpcodeC2<aaa, 0b001>, ZeroPage>;
+
+  def _Accumulator : Inst8<OpcodeStr, OpcodeC2<aaa, 0b010>, Accumulator>;
+
+  def _Absolute : Inst24<OpcodeStr, OpcodeC2<aaa, 0b011>, Absolute>;
+
+  def _ZeroPageX : Inst16<OpcodeStr, OpcodeC2<aaa, 0b101>, ZeroPageX>;
+
+  def _AbsoluteX : Inst24<OpcodeStr, OpcodeC2<aaa, 0b111>, AbsoluteX>;
+}
+
+/// This multiclass covers regular instructions for STX, LDX, INC and DEC
+/// in the chart above.
+multiclass CC2_NonShift<bits<3> aaa, string OpcodeStr = "nop"> {
+  def _ZeroPage : Inst16<OpcodeStr, OpcodeC2<aaa, 0b001>, ZeroPage>;
+
+  def _Absolute : Inst24<OpcodeStr, OpcodeC2<aaa, 0b011>, Absolute>;
+
+  def _ZeroPageX : Inst16<OpcodeStr, OpcodeC2<aaa, 0b101>, ZeroPageX>;
+}
+
+/// "Next, the cc = 00 instructions. Again, the opcodes are different:
+/// aaa opcode
+/// 001 BIT
+/// 010 JMP
+/// 011 JMP (abs)
+/// 100 STY
+/// 101 LDY
+/// 110 CPY
+/// 111 CPX
+/// The addressing modes are the same as the 10 case, except that accumulator
+/// mode is missing.
+/// bbb addressing mode
+/// 000 #immediate
+/// 001 zero page
+/// 011 absolute
+/// 101 zero page,X
+/// 111 absolute,X
+/// And here's how they fit together:
+///
+///       BIT JMP JMP() STY LDY CPY CPX
+/// #                       A0  C0  E0
+/// zp    24            84  A4  C4  E4
+/// abs   2C  4C  6C    8C  AC  CC  EC
+/// zp,X                94  B4
+/// abs,X                   BC
+
+/// The 9 instructions in the top right corner
+multiclass CC0_Regular< bits<3> aaa, string OpcodeStr = "nop"> {
+  def _Immediate : Inst16<OpcodeStr, OpcodeC0<aaa, 0b000>, Immediate> {
+    let XHigh = 1;
+  }
+
+  // 16-bit immediate operand on 65816 when X flag is low.
+  def _Immediate16 : Inst24<OpcodeStr, OpcodeC0<aaa, 0b000>, Immediate16> {
+    let Predicates = [HasW65816Or65EL02];
+    let DecoderNamespace = "MOSXLow";
+    let XLow = 1;
+  }
+
+  def _ZeroPage : Inst16<OpcodeStr, OpcodeC0<aaa, 0b001>, ZeroPage>;
+
+  def _Absolute : Inst24<OpcodeStr, OpcodeC0<aaa, 0b011>, Absolute>;
+}
+
+/// Matching CC1_NoImmediate, but with cc = 11. Common match for 6502X.
+multiclass CC3_NoImmediate<bits<3> aaa, string OpcodeStr = "nop"> {
+  def _IndexedIndirect :
+    Inst16<OpcodeStr, OpcodeC3< aaa, 0b000>, IndexedIndirect>;
+
+  def _ZeroPage :
+    Inst16<OpcodeStr, OpcodeC3< aaa, 0b001>, ZeroPage>;
+
+  /// "The only irregularity is the absence of the nonsensical immediate STA
+  /// instruction."
+  /// skip immediate instruction types here for 0b010
+
+  def _Absolute :
+    Inst24<OpcodeStr, OpcodeC3<aaa, 0b011>, Absolute>;
+
+  def _IndirectIndexed :
+    Inst16<OpcodeStr, OpcodeC3<aaa, 0b100>, IndirectIndexed>;
+
+  def _ZeroPageX :
+    Inst16<OpcodeStr, OpcodeC3<aaa, 0b101>, ZeroPageX>;
+
+  def _AbsoluteY :
+    Inst24<OpcodeStr, OpcodeC3<aaa, 0b110>, AbsoluteY>;
+
+  def _AbsoluteX :
+    Inst24<OpcodeStr, OpcodeC3<aaa, 0b111>, AbsoluteX>;
+}
+
+/// "The conditional branch instructions all have the form xxy10000. The flag
+/// indicated by xx is compared with y, and the branch is taken if they are
+/// equal.
+/// xx flag
+/// 00 negative
+/// 01 overflow
+/// 10 carry
+/// 11 zero
+/// This gives the following branches:
+/// BPL BMI BVC BVS BCC BCS BNE BEQ
+/// 10  30  50  70  90  B0  D0  F0
+
+class ConditionalBranch<string opcodestr, bits<2> flagType, bits<1> value> :
+    Inst16<opcodestr, DefaultOpcode, Relative>, InstConditionalBranch {
+   bits<3> a;
+   let a{2-1} = flagType;
+   let a{0} = value;
+   let opcode = OpcodeABC<a, 0b100, 0b00>;
+}
+//===-- MOSInstrGISel.td - MOS Generic Instructions --------*- tablegen -*-===//
+//
+// Part of LLVM-MOS, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// MOS Generic Instruction Definitions.
+//
+// These generic instructions capture aspects of the abstract semantics of 6502
+// instructions. Often, an existing generic opcode contains more functionality
+// than any one 6502 instruction can actually perform. In such cases, the
+// legalizer lowers these constructs into a combination of other generic opcodes
+// and the target-specific ones here.
+//
+// Note that a 6502 instruction may map to some combination of generic opcodes;
+// that's fine. The problem occurs whenever a generic instruction would map to a
+// large sequence of 6502 instructions. Handling those cases in the instruction
+// selector, can't take advantage of the superior optimization opportunities
+// afforded by the legalizer, GlobalISel CSE, and post-legalizer combiner
+// passes.
+//
+//===----------------------------------------------------------------------===//
+
+class MOSGenericInstruction : GenericInstruction {
+  let Namespace = "MOS";
+  let hasSideEffects = false;
+}
+
+// Version of G_BRCOND that takes an immediate argument for which boolean value
+// triggers the branch. This could be done in the instruction selector, but that
+// would require making 1-bit G_XORs legal. However, they are only legal when
+// used in this way, so the legalizer handles this instead, that way the
+// remaining unhandled G_XORs can be widened to 8 bits.
+def G_BRCOND_IMM : MOSGenericInstruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins type0:$tst, unknown:$truebb, i1imm:$tstval);
+
+  let isBranch = true;
+  let isTerminator = true;
+}
+
+// Generalized 8-bit subtraction and comparison operation. Subsumes SBC, CMP,
+// CPX, and CPY. Depending on the outputs and inputs are used, this will select
+// to one or more of these instructions.
+def G_SBC : MOSGenericInstruction {
+  let OutOperandList = (outs type0:$a, type1:$cout, type1:$n, type1:$v, type1:$z);
+  let InOperandList = (ins type0:$l, type0:$r, type1:$cin);
+}
+
+// Generalized 8-bit load using the zero page indexed addressing mode. The base
+// argument isn't a pointer; it's either a global value or an 8-bit immediate.
+// The index argument is an 8-bit scalar. Additionally expects a
+// MachineMemOperand.
+def G_LOAD_ZP_IDX : MOSGenericInstruction {
+  let OutOperandList = (outs type0:$dst);
+  let InOperandList = (ins unknown:$base, type1:$index);
+  let mayLoad = true;
+}
+
+// Generalized 8-bit load using the absolute addressing mode. The address
+// argument isn't a pointer; it's either a global value or a 16-bit immediate.
+// Additionally expects a MachineMemOperand.
+def G_LOAD_ABS : MOSGenericInstruction {
+  let OutOperandList = (outs type0:$dst);
+  let InOperandList = (ins unknown:$addr);
+  let mayLoad = true;
+}
+
+// Generalized 8-bit load using the absolute indexed addressing mode. The base
+// argument isn't a pointer; it's either a global value or a 16-bit immediate.
+// The index argument is an 8-bit scalar. Additionally expects a
+// MachineMemOperand.
+def G_LOAD_ABS_IDX : MOSGenericInstruction {
+  let OutOperandList = (outs type0:$dst);
+  let InOperandList = (ins unknown:$base, type1:$index);
+  let mayLoad = true;
+}
+
+// Generalized 8-bit load using the indirect addressing mode. Additionally
+// expects a MachineMemOperand.
+def G_LOAD_INDIR : MOSGenericInstruction {
+  let Predicates = [Has65C02];
+  let OutOperandList = (outs type0:$dst);
+  let InOperandList = (ins ptype1:$base);
+  let mayLoad = true;
+}
+
+// Generalized 8-bit load using the indirect indexed addressing mode. The index
+// argument is an 8-bit scalar. Additionally expects a MachineMemOperand.
+def G_LOAD_INDIR_IDX : MOSGenericInstruction {
+  let OutOperandList = (outs type0:$dst);
+  let InOperandList = (ins ptype1:$base, type1:$index);
+  let mayLoad = true;
+}
+
+// Generalized 8-bit store using the zero page indexed addressing mode. The base
+// argument isn't a pointer; it's either a global value or a 8-bit immediate.
+// The index argument is an 8-bit scalar. Additionally expects a
+// MachineMemOperand.
+def G_STORE_ZP_IDX : MOSGenericInstruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins type0:$src, unknown:$base, type1:$index);
+  let mayStore = true;
+}
+
+// Generalized 8-bit store using the absolute addressing mode. The address
+// argument isn't a pointer; it's either a global value or a 16-bit immediate.
+// Additionally expects a MachineMemOperand.
+def G_STORE_ABS : MOSGenericInstruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins type0:$src, unknown:$addr);
+  let mayStore = true;
+}
+
+// Generalized 8-bit store using the absolute indexed addressing mode. The base
+// argument isn't a pointer; it's either a global value or a 16-bit immediate.
+// The index argument is an 8-bit scalar. Additionally expects a
+// MachineMemOperand.
+def G_STORE_ABS_IDX : MOSGenericInstruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins type0:$src, unknown:$base, type1:$index);
+  let mayStore = true;
+}
+
+// Generalized 8-bit store using the indirect addressing mode. Additionally
+// expects a MachineMemOperand.
+def G_STORE_INDIR : MOSGenericInstruction {
+  let Predicates = [Has65C02];
+  let OutOperandList = (outs);
+  let InOperandList = (ins type0:$src, ptype1:$base);
+  let mayStore = true;
+}
+
+// Generalized 8-bit store using the indirect indexed addressing mode. The index
+// argument is an 8-bit scalar. Additionally expects a MachineMemOperand.
+def G_STORE_INDIR_IDX : MOSGenericInstruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins type0:$src, ptype1:$base, type1:$index);
+  let mayStore = true;
+}
+
+// Shift an 8-bit value left one bit, placing $carry_in in the LSB and placing
+// the previous MSB bit into $carry_out. This "even" version can be chained to
+// perform multi-byte shifts.
+def G_SHLE : MOSGenericInstruction {
+  let OutOperandList = (outs type0:$dst, type1:$carry_out);
+  let InOperandList = (ins type0:$src, type1:$carry_in);
+}
+
+// Logically shift an 8-bit value right one bit, placing $carry_in in the MSB
+// and placing the previous LSB bit into $carry_out. This "even" version can be
+// chained to perform multi-byte shifts.
+def G_LSHRE : MOSGenericInstruction {
+  let OutOperandList = (outs type0:$dst, type1:$carry_out);
+  let InOperandList = (ins type0:$src, type1:$carry_in);
+}
+
+// These opcodes represent multi-byte increment and decrement operations. Each
+// use operand is one byte; either a register or an absolute address. The def
+// operands correspond to only the register use operands, and they must be tied
+// accordingly. Arguments are little-endian.
+class MOSGIncDec : MOSGenericInstruction {
+  let OutOperandList = (outs variable_ops);
+  let InOperandList = (ins variable_ops);
+}
+
+def G_INC : MOSGIncDec;
+def G_DEC : MOSGIncDec;
+
+// These provide a way for the instruction selector to temporarily mark a G_INC
+// in progress as mayLoad/mayStore once it obtains an addressing mode argument.
+let mayLoad = true, mayStore = true in {
+  def G_INC_TMP : MOSGIncDec;
+  def G_DEC_TMP : MOSGIncDec;
+}
+
+def G_CMPZ : MOSGenericInstruction {
+  let OutOperandList = (outs type0:$z);
+  let InOperandList = (ins variable_ops);
+}
+
+// Indexed indirect branch.
+def G_BRINDIRECT_IDX : MOSGenericInstruction {
+  let Predicates = [HasJMPIdxIndir];
+  let OutOperandList = (outs);
+  let InOperandList = (ins type0:$src, type1:$index);
+
+  let isBranch = true;
+  let isTerminator = true;
+  let isBarrier = true;
+  let isIndirectBranch = true;
+}
+//===-- MOSInstrInfo.td - MOS Instruction defs -------------*- tablegen -*-===//
+//
+// Part of LLVM-MOS, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// This file describes the MOS instructions in TableGen format.
+//
+//===----------------------------------------------------------------------===//
+
+/// These instruction format definitions exist, thanks to Neil Parker's
+/// analysis of the 65xx instruction set, at:
+/// http://nparker.llx.com/a2/opcodes.html
+/// Parker's analysis is closely reflected in the structure of this file, and
+/// his words are quoted liberally herein.  Parker's sense-making of the 6502
+/// and family was critical in creating these format definitions, and we're
+/// indebted to him for the excellent analysis.
+///
+/// These instruction definitions provide the instruction set for the LLVM MC
+/// layer. They correspond to the real instruction set of the 6502. Given their
+/// irregularity, the side effects and behavior of these instructions are not
+/// themselves modeled. Instead, a regularized virtual instruction set was formed
+/// out of pseudo-instructions, and these were fully modelled for the code
+/// generator's purposes. Lowering of these pseudoinstructions occurs in
+/// AsmPrinter, which is the boundary between the CodeGen and MC layers.
+
+include "MOSInstrFormats.td"
+
+defm ORA : CC1_All<0b000, "ora", [Has6502]>;
+defm AND : CC1_All<0b001, "and", [Has6502]>;
+defm EOR : CC1_All<0b010, "eor", [Has6502]>;
+defm ADC : CC1_All<0b011, "adc", [Has6502]>;
+defm LDA : CC1_All<0b101, "lda", [Has6502]>;
+defm CMP : CC1_All<0b110, "cmp", [Has6502]>;
+defm SBC : CC1_All<0b111, "sbc", [Has6502]>;
+
+/// The STA # instruction would be nonsensical, so skip it.
+defm STA : CC1_NoImmediate<0b100, "sta", [Has6502]>;
+
+let Predicates = [Has6502] in {
+
+/// CC2 regular instructions
+defm ASL : CC2_Shift<0b000, "asl">;
+defm ROL : CC2_Shift<0b001, "rol">;
+defm LSR : CC2_Shift<0b010, "lsr">;
+defm ROR : CC2_Shift<0b011, "ror">;
+
+def : InstAlias<"asl a", (ASL_Accumulator)>;
+def : InstAlias<"rol a", (ROL_Accumulator)>;
+def : InstAlias<"lsr a", (LSR_Accumulator)>;
+def : InstAlias<"ror a", (ROR_Accumulator)>;
+
+defm DEC : CC2_NonShift<0b110, "dec">;
+defm INC : CC2_NonShift<0b111, "inc">;
+
+/// CC2 exceptional instructions
+///             ASL ROL LSR ROR STX LDX DEC INC
+/// #                               A2
+/// zp          06  26  46  66  86  A6  C6  E6
+/// A           0A  2A  4A  6A
+/// abs         0E  2E  4E  6E  8E  AE  CE  EE
+/// zp,X/zp,Y   16  36  56  76  96  B6  D6  F6
+/// abs,X/abs,Y	1E	3E	5E	7E      BE  DE  FE
+
+def STX_ZeroPage :
+	Inst16<"stx", OpcodeC2<0b100, 0b001>, ZeroPage>;
+def STX_ZeroPageY :
+	Inst16<"stx", OpcodeC2<0b100, 0b101>, ZeroPageY>;
+def STX_Absolute :
+	Inst24<"stx", OpcodeC2<0b100, 0b011>, Absolute>;
+
+def LDX_Immediate :
+	Inst16<"ldx", OpcodeC2<0b101, 0b000>, Immediate> {
+  let XHigh = 1;
+}
+def LDX_ZeroPage :
+	Inst16<"ldx", OpcodeC2<0b101, 0b001>, ZeroPage>;
+def LDX_Absolute :
+	Inst24<"ldx", OpcodeC2<0b101, 0b011>, Absolute>;
+def LDX_ZeroPageY :
+	Inst16<"ldx", OpcodeC2<0b101, 0b101>, ZeroPageY>;
+def LDX_AbsoluteY :
+	Inst24<"ldx", OpcodeC2<0b101, 0b111>, AbsoluteY>;
+
+def DEC_AbsoluteX :
+	Inst24<"dec", OpcodeC2<0b110, 0b111>, AbsoluteX>;
+def INC_AbsoluteX :
+	Inst24<"inc", OpcodeC2<0b111, 0b111>, AbsoluteX>;
+
+
+/// CC0 regular instructions, the nine in the top left corner of this diagram:
+///       BIT JMP JMP() STY LDY CPY CPX
+/// #                       A0  C0  E0
+/// zp    24            84  A4  C4  E4
+/// abs   2C  4C  6C    8C  AC  CC  EC
+/// zp,X                94  B4
+/// abs,X                   BC
+///
+/// 101 LDY
+/// 110 CPY
+/// 111 CPX
+
+defm LDY : CC0_Regular<0b101, "ldy">;
+defm CPY : CC0_Regular<0b110, "cpy">;
+defm CPX : CC0_Regular<0b111, "cpx">;
+
+/// CC0 irregular instructions, i.e. most of them
+
+/// "Next, the cc = 00 instructions. Again, the opcodes are different:
+/// aaa opcode
+/// 001 BIT
+/// 010 JMP
+/// 011 JMP (abs)
+/// 100 STY
+/// 101 LDY
+/// 110 CPY
+/// 111 CPX
+/// The addressing modes are the same as the 10 case, except that accumulator
+/// mode is missing.
+/// bbb addressing mode
+/// 000 #immediate
+/// 001 zero page
+/// 011 absolute
+/// 101 zero page,X
+/// 111 absolute,X
+/// And here's how they fit together:
+///
+///       BIT JMP JMP() STY LDY CPY CPX
+/// #                       A0  C0  E0
+/// zp    24            84  A4  C4  E4
+/// abs   2C  4C  6C    8C  AC  CC  EC
+/// zp,X                94  B4
+/// abs,X                   BC
+
+def BIT_ZeroPage :
+	Inst16<"bit", OpcodeC0<0b001, 0b001>, ZeroPage>;
+def BIT_Absolute :
+	Inst24<"bit", OpcodeC0<0b001, 0b011>, Absolute>;
+def JMP_Absolute :
+	Inst24<"jmp", OpcodeC0<0b010, 0b011>, Absolute>, InstUnconditionalBranch;
+def JMP_Indirect16 :
+	Inst24<"jmp", OpcodeC0<0b011, 0b011>, Indirect16>,
+	InstUnconditionalBranch {
+  let isIndirectBranch = true;
+}
+
+def STY_ZeroPage :
+	Inst16<"sty", OpcodeC0<0b100, 0b001>, ZeroPage>;
+def STY_Absolute :
+	Inst24<"sty", OpcodeC0<0b100, 0b011>, Absolute>;
+def STY_ZeroPageX :
+	Inst16<"sty", OpcodeC0<0b100, 0b101>, ZeroPageX>;
+def LDY_ZeroPageX :
+	Inst16<"ldy", OpcodeC0<0b101, 0b101>, ZeroPageX>;
+def LDY_AbsoluteX :
+	Inst24<"ldy", OpcodeC0<0b101, 0b111>, AbsoluteX>;
+
+/// The conditional branch instructions all have the form xxy10000. The flag
+/// indicated by xx is compared with y, and the branch is taken if they are
+/// equal.
+/// xx flag
+/// 00 negative
+/// 01 overflow
+/// 10 carry
+/// 11 zero
+/// This gives the following branches:
+/// BPL BMI BVC BVS BCC BCS BNE BEQ
+/// 10  30  50  70  90  B0  D0  F0
+
+def BPL_Relative : ConditionalBranch<"bpl", 0b00, 0b0>;
+def BMI_Relative : ConditionalBranch<"bmi", 0b00, 0b1>;
+def BVC_Relative : ConditionalBranch<"bvc", 0b01, 0b0>;
+def BVS_Relative : ConditionalBranch<"bvs", 0b01, 0b1>;
+def BCC_Relative : ConditionalBranch<"bcc", 0b10, 0b0>;
+def BCS_Relative : ConditionalBranch<"bcs", 0b10, 0b1>;
+def BNE_Relative : ConditionalBranch<"bne", 0b11, 0b0>;
+def BEQ_Relative : ConditionalBranch<"beq", 0b11, 0b1>;
+
+/// Single-byte opcodes
+/// BRK JSR abs RTI RTS
+/// 00  20      40  60
+/// (JSR is the only absolute-addressing instruction that doesn't fit the
+/// aaabbbcc pattern.)
+///
+/// Other single-byte instructions:
+/// PHP PLP PHA PLA DEY TAY INY INX
+/// 08  28  48  68  88  A8  C8  E8
+/// CLC SEC CLI SEI TYA CLV CLD SED
+/// 18  38  58  78  98  B8  D8  F8
+/// TXA TXS TAX TSX DEX NOP
+/// 8A  9A  AA  BA  CA  EA
+
+def BRK_Implied: InstLow0<"brk", 0b0000>, InstUnconditionalBranch;
+/// JSR is the only instruction that does not follow the current pattern.
+def JSR_Absolute: Inst24<"jsr", Opcode<0x20>, Absolute>, InstCall;
+def RTI_Implied: InstLow0<"rti", 0b0100>, InstReturn;
+def RTS_Implied: InstLow0<"rts", 0b0110>, InstReturn;
+
+def PHP_Implied: InstLow8<"php", 0b0000>;
+def PLP_Implied: InstLow8<"plp", 0b0010>;
+def PHA_Implied: InstLow8<"pha", 0b0100>;
+def PLA_Implied: InstLow8<"pla", 0b0110>;
+def DEY_Implied: InstLow8<"dey", 0b1000>;
+def TAY_Implied: InstLow8<"tay", 0b1010>;
+def INY_Implied: InstLow8<"iny", 0b1100>;
+def INX_Implied: InstLow8<"inx", 0b1110>;
+
+def CLC_Implied: InstLow8<"clc", 0b0001>;
+def SEC_Implied: InstLow8<"sec", 0b0011>;
+def CLI_Implied: InstLow8<"cli", 0b0101>;
+def SEI_Implied: InstLow8<"sei", 0b0111>;
+def TYA_Implied: InstLow8<"tya", 0b1001>;
+def CLV_Implied: InstLow8<"clv", 0b1011>;
+def CLD_Implied: InstLow8<"cld", 0b1101>;
+def SED_Implied: InstLow8<"sed", 0b1111>;
+
+def TXA_Implied: InstLowA<"txa", 0b1000>;
+def TXS_Implied: InstLowA<"txs", 0b1001>;
+def TAX_Implied: InstLowA<"tax", 0b1010>;
+def TSX_Implied: InstLowA<"tsx", 0b1011>;
+def DEX_Implied: InstLowA<"dex", 0b1100>;
+def NOP_Implied: InstLowA<"nop", 0b1110>;
+
+} // Predicates = [Has6502]
+
+/// Opcode naming and order follows the "NMOS 6510 Unintended Opcodes" eBook.
+
+let Predicates = [Has6502XOrDTV] in {
+
+let DecoderNamespace = "6502x" in {
+
+defm SLO : CC3_NoImmediate<0b000, "slo">;
+defm RLA : CC3_NoImmediate<0b001, "rla">;
+defm SRE : CC3_NoImmediate<0b010, "sre">;
+defm RRA : CC3_NoImmediate<0b011, "rra">;
+
+def SAX_IndexedIndirect : Inst16<"sax", OpcodeC3<0b100, 0b000>, IndexedIndirect>;
+def SAX_ZeroPage : Inst16<"sax", OpcodeC3<0b100, 0b001>, ZeroPage>;
+def SAX_Absolute : Inst24<"sax", OpcodeC3<0b100, 0b011>, Absolute>;
+def SAX_ZeroPageY : Inst16<"sax", OpcodeC3<0b100, 0b101>, ZeroPageY>;
+
+def LAX_IndexedIndirect : Inst16<"lax", OpcodeC3<0b101, 0b000>, IndexedIndirect>;
+def LAX_ZeroPage : Inst16<"lax", OpcodeC3<0b101, 0b001>, ZeroPage>;
+def LAX_Absolute : Inst24<"lax", OpcodeC3<0b101, 0b011>, Absolute>;
+def LAX_IndirectIndexed : Inst16<"lax", OpcodeC3<0b101, 0b100>, IndirectIndexed>;
+def LAX_ZeroPageY : Inst16<"lax", OpcodeC3<0b101, 0b101>, ZeroPageY>;
+def LAX_AbsoluteY : Inst24<"lax", OpcodeC3<0b101, 0b111>, AbsoluteY>;
+
+defm DCP : CC3_NoImmediate<0b110, "dcp">;
+defm ISC : CC3_NoImmediate<0b111, "isc">;
+
+def ALR_Immediate: Inst16<"alr", OpcodeC3<0b010, 0b010>, Immediate>;
+def ARR_Immediate: Inst16<"arr", OpcodeC3<0b011, 0b010>, Immediate>;
+
+def ANE_Immediate: Inst16<"ane", OpcodeC3<0b100, 0b010>, Immediate>;
+
+def LAX_Immediate: Inst16<"lax", OpcodeC3<0b101, 0b010>, Immediate>;
+
+}
+
+} // Predicates = [Has6502XOrDTV]
+
+let Predicates = [Has6502X] in {
+
+let DecoderNamespace = "6502x" in {
+
+def ANC_Immediate: Inst16<"anc", OpcodeC3<0b001, 0b010>, Immediate>;
+def SBX_Immediate: Inst16<"sbx", OpcodeC3<0b110, 0b010>, Immediate>;
+
+def LAS_AbsoluteY : Inst24<"las", OpcodeC3<0b101, 0b110>, AbsoluteY>;
+
+def SHA_IndirectIndexed : Inst16<"sha", OpcodeC3<0b100, 0b100>, IndirectIndexed>;
+def SHA_AbsoluteY : Inst24<"sha", OpcodeC3<0b100, 0b111>, AbsoluteY>;
+
+def SHX_AbsoluteY : Inst24<"shx", OpcodeC2<0b100, 0b111>, AbsoluteY>;
+
+def SHY_AbsoluteX : Inst24<"shy", OpcodeC0<0b100, 0b111>, AbsoluteX>;
+
+def TAS_AbsoluteY : Inst24<"tas", OpcodeC3<0b100, 0b110>, AbsoluteY>;
+
+def NOP_Immediate: Inst16<"nop", OpcodeC2<0b000, 0b110>, Immediate>;
+def NOP_ZeroPage: Inst16<"nop", OpcodeC0<0b000, 0b001>, ZeroPage>;
+def NOP_ZeroPageX: Inst16<"nop", OpcodeC0<0b000, 0b101>, ZeroPageX>;
+def NOP_AbsoluteX: Inst24<"nop", OpcodeC0<0b000, 0b111>, AbsoluteX>;
+
+}
+
+} // Predicates = [Has6502X]
+
+let Predicates = [Has65DTV02] in {
+
+let DecoderNamespace = "65dtv02" in {
+
+def BRA_Relative_DTV02 : Inst16<"bra", Opcode<0x12>, Relative>,
+  InstUnconditionalBranch;
+def SAC_Immediate : Inst16<"sac", Opcode<0x32>, Immediate>;
+def SIR_Immediate : Inst16<"sir", Opcode<0x42>, Immediate>;
+
+}
+
+} // Predicates = [Has65DTV02]
+
+let Predicates = [Has65C02] in {
+
+/// Single-byte opcodes
+/// INCA DECA PHY PLY PHX PLX
+/// 1A   3A   5A  7A  DA  FA
+
+def INC_Accumulator: InstLowA<"inc", 0b0001>;
+def DEC_Accumulator: InstLowA<"dec", 0b0011>;
+def : InstAlias<"inc a", (INC_Accumulator)>;
+def : InstAlias<"dec a", (DEC_Accumulator)>;
+def : InstAlias<"ina", (INC_Accumulator), 0>;
+def : InstAlias<"dea", (DEC_Accumulator), 0>;
+def PHY_Implied: InstLowA<"phy", 0b0101>; /// Push Y
+def PLY_Implied: InstLowA<"ply", 0b0111>; /// Pull Y
+def PHX_Implied: InstLowA<"phx", 0b1101>; /// Push X
+def PLX_Implied: InstLowA<"plx", 0b1111>; /// Pull X
+
+/// Unconditional relative branch instruction
+/// BRA
+/// 80
+
+def BRA_Relative : Inst16<"bra", OpcodeC0<0b100, 0b000>, Relative>,
+    InstUnconditionalBranch;
+
+def JMP_IndexedIndirect : Inst24<"jmp", Opcode<0x7c>, IndexedIndirect16>,
+    InstUnconditionalBranch {
+  let isIndirectBranch = true;
+}
+
+def BIT_ZeroPageX : Inst16<"bit", Opcode<0x34>, ZeroPageX>;
+def BIT_AbsoluteX : Inst24<"bit", Opcode<0x3c>, AbsoluteX>;
+def BIT_Immediate : Inst16<"bit", Opcode<0x89>, Immediate> {
+  let MHigh = 1;
+}
+
+def TRB_ZeroPage : Inst16<"trb", Opcode<0x14>, ZeroPage>; /// Test and Reset Bits
+def TRB_Absolute : Inst24<"trb", Opcode<0x1c>, Absolute>; /// Test and Reset Bits
+
+def TSB_ZeroPage : Inst16<"tsb", Opcode<0x04>, ZeroPage>; /// Test and Set Bits
+def TSB_Absolute : Inst24<"tsb", Opcode<0x0c>, Absolute>; /// Test and Set Bits
+
+///       STZ
+/// zp    64
+/// abs   9C
+/// zp,X  74
+/// abs,X 9E
+
+def STZ_ZeroPage : Inst16<"stz", OpcodeC0<0b011, 0b001>, ZeroPage>;
+def STZ_Absolute : Inst24<"stz", OpcodeC0<0b100, 0b111>, Absolute>;
+def STZ_ZeroPageX : Inst16<"stz", OpcodeC0<0b011, 0b101>, ZeroPageX>;
+def STZ_AbsoluteX : Inst24<"stz", OpcodeC2<0b100, 0b111>, AbsoluteX>;
+
+} // Predicates = [Has65C02]
+
+let Predicates = [HasR65C02] in {
+
+let DecoderNamespace = "r65c02" in {
+/// Bit manipulation/branching instructions
+def RMB_ZeroPage : InstBitModify<"rmb", Opcode<0x07>, ZeroPage>;
+def SMB_ZeroPage : InstBitModify<"smb", Opcode<0x87>, ZeroPage>;
+def BBR_ZeroPage : InstBitBranch<"bbr", Opcode<0x0f>>;
+def BBS_ZeroPage : InstBitBranch<"bbs", Opcode<0x8f>>;
+}
+
+/// Bit manipulation/branching instructions - aliases
+def BBR0_ZeroPage : InstAlias<"bbr0 $source, $location", (BBR_ZeroPage 0, addr8:$source, pcrel8at2:$location)>;
+def BBR1_ZeroPage : InstAlias<"bbr1 $source, $location", (BBR_ZeroPage 1, addr8:$source, pcrel8at2:$location)>;
+def BBR2_ZeroPage : InstAlias<"bbr2 $source, $location", (BBR_ZeroPage 2, addr8:$source, pcrel8at2:$location)>;
+def BBR3_ZeroPage : InstAlias<"bbr3 $source, $location", (BBR_ZeroPage 3, addr8:$source, pcrel8at2:$location)>;
+def BBR4_ZeroPage : InstAlias<"bbr4 $source, $location", (BBR_ZeroPage 4, addr8:$source, pcrel8at2:$location)>;
+def BBR5_ZeroPage : InstAlias<"bbr5 $source, $location", (BBR_ZeroPage 5, addr8:$source, pcrel8at2:$location)>;
+def BBR6_ZeroPage : InstAlias<"bbr6 $source, $location", (BBR_ZeroPage 6, addr8:$source, pcrel8at2:$location)>;
+def BBR7_ZeroPage : InstAlias<"bbr7 $source, $location", (BBR_ZeroPage 7, addr8:$source, pcrel8at2:$location)>;
+
+def BBS0_ZeroPage : InstAlias<"bbs0 $source, $location", (BBS_ZeroPage 0, addr8:$source, pcrel8at2:$location)>;
+def BBS1_ZeroPage : InstAlias<"bbs1 $source, $location", (BBS_ZeroPage 1, addr8:$source, pcrel8at2:$location)>;
+def BBS2_ZeroPage : InstAlias<"bbs2 $source, $location", (BBS_ZeroPage 2, addr8:$source, pcrel8at2:$location)>;
+def BBS3_ZeroPage : InstAlias<"bbs3 $source, $location", (BBS_ZeroPage 3, addr8:$source, pcrel8at2:$location)>;
+def BBS4_ZeroPage : InstAlias<"bbs4 $source, $location", (BBS_ZeroPage 4, addr8:$source, pcrel8at2:$location)>;
+def BBS5_ZeroPage : InstAlias<"bbs5 $source, $location", (BBS_ZeroPage 5, addr8:$source, pcrel8at2:$location)>;
+def BBS6_ZeroPage : InstAlias<"bbs6 $source, $location", (BBS_ZeroPage 6, addr8:$source, pcrel8at2:$location)>;
+def BBS7_ZeroPage : InstAlias<"bbs7 $source, $location", (BBS_ZeroPage 7, addr8:$source, pcrel8at2:$location)>;
+
+def RMB0_ZeroPage : InstAlias<"rmb0 $source", (RMB_ZeroPage 0, addr8:$source)>;
+def RMB1_ZeroPage : InstAlias<"rmb1 $source", (RMB_ZeroPage 1, addr8:$source)>;
+def RMB2_ZeroPage : InstAlias<"rmb2 $source", (RMB_ZeroPage 2, addr8:$source)>;
+def RMB3_ZeroPage : InstAlias<"rmb3 $source", (RMB_ZeroPage 3, addr8:$source)>;
+def RMB4_ZeroPage : InstAlias<"rmb4 $source", (RMB_ZeroPage 4, addr8:$source)>;
+def RMB5_ZeroPage : InstAlias<"rmb5 $source", (RMB_ZeroPage 5, addr8:$source)>;
+def RMB6_ZeroPage : InstAlias<"rmb6 $source", (RMB_ZeroPage 6, addr8:$source)>;
+def RMB7_ZeroPage : InstAlias<"rmb7 $source", (RMB_ZeroPage 7, addr8:$source)>;
+
+def SMB0_ZeroPage : InstAlias<"smb0 $source", (SMB_ZeroPage 0, addr8:$source)>;
+def SMB1_ZeroPage : InstAlias<"smb1 $source", (SMB_ZeroPage 1, addr8:$source)>;
+def SMB2_ZeroPage : InstAlias<"smb2 $source", (SMB_ZeroPage 2, addr8:$source)>;
+def SMB3_ZeroPage : InstAlias<"smb3 $source", (SMB_ZeroPage 3, addr8:$source)>;
+def SMB4_ZeroPage : InstAlias<"smb4 $source", (SMB_ZeroPage 4, addr8:$source)>;
+def SMB5_ZeroPage : InstAlias<"smb5 $source", (SMB_ZeroPage 5, addr8:$source)>;
+def SMB6_ZeroPage : InstAlias<"smb6 $source", (SMB_ZeroPage 6, addr8:$source)>;
+def SMB7_ZeroPage : InstAlias<"smb7 $source", (SMB_ZeroPage 7, addr8:$source)>;
+
+} // Predicates = [HasR65C02]
+
+let Predicates = [HasW65C02] in {
+
+def STP_Implied : InstLowB<"stp", 0b1101>;
+def WAI_Implied : InstLowB<"wai", 0b1100>;
+
+} // Predicates = [HasW65C02]
+
+let Predicates = [Has65CE02] in {
+
+/// Layout follows CMOS 65CE02 micrprocessor datasheet:
+/// http://archive.6502.org/datasheets/mos_65ce02_mpu.pdf
+
+/// Branches and jumps
+
+let DecoderNamespace = "65ce02" in {
+def BPL_Relative16 : Inst24<"bpl", Opcode<0x13>, Relative16>,
+	InstConditionalBranch;
+def BMI_Relative16 : Inst24<"bmi", Opcode<0x33>, Relative16>,
+	InstConditionalBranch;
+def BVC_Relative16 : Inst24<"bvc", Opcode<0x53>, Relative16>,
+	InstConditionalBranch;
+def BSR_Relative16 : Inst24<"bsr", Opcode<0x63>, Relative16>,
+	InstCall;
+def BVS_Relative16 : Inst24<"bvs", Opcode<0x73>, Relative16>,
+	InstConditionalBranch;
+def BRA_Relative16 : Inst24<"bra", Opcode<0x83>, Relative16>,
+	InstUnconditionalBranch; /// BRU
+def BCC_Relative16 : Inst24<"bcc", Opcode<0x93>, Relative16>,
+	InstConditionalBranch;
+def BCS_Relative16 : Inst24<"bcs", Opcode<0xb3>, Relative16>,
+	InstConditionalBranch;
+def BNE_Relative16 : Inst24<"bne", Opcode<0xd3>, Relative16>,
+	InstConditionalBranch;
+def BEQ_Relative16 : Inst24<"beq", Opcode<0xf3>, Relative16>,
+	InstConditionalBranch;
+
+def JSR_AbsoluteIndirect: Inst24<"jsr", Opcode<0x22>, Indirect16>,
+	InstCall {
+  let isIndirectBranch = true;
+}
+def JSR_AbsoluteIndirectX: Inst24<"jsr", Opcode<0x23>, IndexedIndirect16>,
+	InstCall {
+  let isIndirectBranch = true;
+}
+
+def RTN_Immediate : Inst16<"rtn", Opcode<0x62>, Immediate>, InstReturn;
+
+/// Arithmetic Operations
+
+def NEG_Implied: InstLow2<"neg", 0b0100>; /// NEGate (or 2's complement) accumulator
+
+def ASR_Implied: InstLow3<"asr", 0b0100>; /// Arithmetic Shift Right accumulator
+def ASR_ZeroPage: Inst16<"asr", Opcode<0x44>, ZeroPage>; 
+def ASR_ZeroPageX: Inst16<"asr", Opcode<0x54>, ZeroPageX>; 
+
+def INW_ZeroPage : Inst16<"inw", OpcodeC3<0b111, 0b000>, ZeroPage>; /// Inc. word
+def DEW_ZeroPage : Inst16<"dew", OpcodeC3<0b110, 0b000>, ZeroPage>; /// Dec. word
+
+def INZ_Implied: InstLowB<"inz", 0b0001>; /// INcrement Z register;
+def DEZ_Implied: InstLowB<"dez", 0b0011>; /// DEcrement Z register;
+
+def ASW_Absolute : Inst24<"asw", Opcode<0xcb>, Absolute>; /// Arithmetic Shift left Word
+def ROW_Absolute : Inst24<"row", Opcode<0xeb>, Absolute>; /// ROtate left Word
+
+def ORA_IndirectZeroPageZ : Inst16<"ora", Opcode<0x12>, IndirectZeroPageZ>;
+def AND_IndirectZeroPageZ : Inst16<"and", Opcode<0x32>, IndirectZeroPageZ>;
+def EOR_IndirectZeroPageZ : Inst16<"eor", Opcode<0x52>, IndirectZeroPageZ>;
+def ADC_IndirectZeroPageZ : Inst16<"adc", Opcode<0x72>, IndirectZeroPageZ>;
+def CMP_IndirectZeroPageZ : Inst16<"cmp", Opcode<0xd2>, IndirectZeroPageZ>;
+def SBC_IndirectZeroPageZ : Inst16<"sbc", Opcode<0xf2>, IndirectZeroPageZ>;
+
+def CPZ_Immediate : Inst16<"cpz", OpcodeC2<0b110, 0b000>, Immediate>;
+def CPZ_ZeroPage : Inst16<"cpz", OpcodeC0<0b110, 0b101>, ZeroPage>;
+def CPZ_Absolute : Inst24<"cpz", OpcodeC0<0b110, 0b111>, Absolute>;
+
+/// Loads, Stores, Pushes, Pulls and Transfers
+
+def LDA_IndirectZeroPageZ : Inst16<"lda", OpcodeC2<0b101, 0b100>, IndirectZeroPageZ>;
+def LDA_IndirectStackRelativeY_CE02 : Inst16<"lda", Opcode<0xe2>, IndirectStackRelativeY>;
+
+def LDZ_Immediate : Inst16<"ldz", OpcodeC3<0b101, 0b000>, Immediate>;
+def LDZ_Absolute : Inst24<"ldz", OpcodeC3<0b101, 0b010>, Absolute>;
+def LDZ_AbsoluteX : Inst24<"ldz", OpcodeC3<0b101, 0b110>, AbsoluteX>;
+
+def STA_IndirectZeroPageZ : Inst16<"sta", Opcode<0x92>, IndirectZeroPageZ>;
+def STA_IndirectStackRelativeY_CE02 : Inst16<"sta", Opcode<0x82>, IndirectStackRelativeY>;
+def STX_AbsoluteY : Inst24<"stx", Opcode<0x9b>, AbsoluteY>;
+def STY_AbsoluteX : Inst24<"sty", Opcode<0x8b>, AbsoluteX>;
+
+def CLE_Implied: InstLow2<"cle", 0b0000>; /// CLear stack Extend disable bit
+def SEE_Implied: InstLow3<"see", 0b0000>; /// SEt stack Extend disable bit
+
+def PHW_Immediate : Inst24<"phw", Opcode<0xf4>, Immediate16>; /// PusH Data Immediate (Word)
+def PHW_Absolute : Inst24<"phw", Opcode<0xfc>, Absolute>; /// PusH Data Absolute (Word)
+
+def PHZ_Implied: InstLowB<"phz", 0b1101>; /// PusH Z register onto stack
+def PLZ_Implied: InstLowB<"plz", 0b1111>; /// PulL Z register from stack
+
+def TAZ_Implied: InstLowB<"taz", 0b0100>; /// Transfer Accumulator to Z register
+def TZA_Implied: InstLowB<"tza", 0b0110>; /// Transfer Z register to Accumulator
+
+def TAB_Implied: InstLowB<"tab", 0b0101>; /// Transfer Accumulator to Base page reg.
+def TBA_Implied: InstLowB<"tba", 0b0111>; /// Transfer Base page register to Acc.
+
+def TSY_Implied: InstLowB<"tsy", 0b0000>; /// Transfer Stack pointer high byte to Y
+def TYS_Implied: InstLowB<"tys", 0b0010>; /// Transfer Y reg. to Stack pointer high byte
+}
+
+} // Predicates = [Has65CE02]
+
+let Predicates = [Has4510] in {
+
+let DecoderNamespace = "65ce02" in {
+def MAP_Implied: Inst8<"map", Opcode<0x5c>>;
+}
+
+def : MnemonicAlias<"eom", "nop">;
+
+} // Predicates = [Has4510]
+
+let Predicates = [Has45GS02] in {
+
+let DecoderNamespace = "45gs02" in {
+
+/// Q pseudo register implicit (NEG NEG prefix, 3 bytes)
+def ASLQ_Implicit : Inst4502NegNegImplicit<"aslq", Opcode<0x0a>, Implicit>;
+def ASRQ_Implicit : Inst4502NegNegImplicit<"asrq", Opcode<0x43>, Implicit>;
+def DEQ_Implicit : Inst4502NegNegImplicit<"deq", Opcode<0x3a>, Implicit>;
+def INQ_Implicit : Inst4502NegNegImplicit<"inq", Opcode<0x1a>, Implicit>;
+def LSRQ_Implicit : Inst4502NegNegImplicit<"lsrq", Opcode<0x4a>, Implicit>;
+def ROLQ_Implicit : Inst4502NegNegImplicit<"rolq", Opcode<0x2a>, Implicit>;
+def RORQ_Implicit : Inst4502NegNegImplicit<"rorq", Opcode<0x6a>, Implicit>;
+
+/// Flat memory addressing mode (zp pointer treated as 32-bit), e.g. `ora [$ea], z`
+/// (NOP prefix, 3 bytes)
+def ORA_FlatIndirectZeroPageZ : Inst4502Nop16<"ora", Opcode<0x12>, IndirectIndexedLongZ>;
+def AND_FlatIndirectZeroPageZ : Inst4502Nop16<"and", Opcode<0x32>, IndirectIndexedLongZ>;
+def EOR_FlatIndirectZeroPageZ : Inst4502Nop16<"eor", Opcode<0x52>, IndirectIndexedLongZ>;
+def ADC_FlatIndirectZeroPageZ : Inst4502Nop16<"adc", Opcode<0x72>, IndirectIndexedLongZ>;
+def STA_FlatIndirectZeroPageZ : Inst4502Nop16<"sta", Opcode<0x92>, IndirectIndexedLongZ>;
+def LDA_FlatIndirectZeroPageZ : Inst4502Nop16<"lda", Opcode<0xb2>, IndirectIndexedLongZ>;
+def CMP_FlatIndirectZeroPageZ : Inst4502Nop16<"cmp", Opcode<0xd2>, IndirectIndexedLongZ>;
+def SBC_FlatIndirectZeroPageZ : Inst4502Nop16<"sbc", Opcode<0xf2>, IndirectIndexedLongZ>;
+
+/// E.g. `orq [$ea]`
+def ORQ_IndirectLong : Inst4502NegNegNop8<"orq", Opcode<0x12>, IndirectLong>;
+def ANDQ_IndirectLong : Inst4502NegNegNop8<"andq", Opcode<0x32>, IndirectLong>;
+def EORQ_IndirectLong : Inst4502NegNegNop8<"eorq", Opcode<0x52>, IndirectLong>;
+def ADCQ_IndirectLong : Inst4502NegNegNop8<"adcq", Opcode<0x72>, IndirectLong>;
+def STQ_IndirectLong : Inst4502NegNegNop8<"stq", Opcode<0x92>, IndirectLong>;
+def CMPQ_IndirectLong : Inst4502NegNegNop8<"cmpq", Opcode<0xd2>, IndirectLong>;
+def SBCQ_IndirectLong : Inst4502NegNegNop8<"sbcq", Opcode<0xf2>, IndirectLong>;
+// E.g. `ldq [$ea], z`
+def LDQ_IndirectIndexedLongZ : Inst4502NegNegNop8<"ldq", Opcode<0xb2>, IndirectIndexedLongZ>;
+
+/// Q pseudo register quad mode, e.g. `orq $eaea` (NEG NEG prefix, 5 bytes)
+def ORQ_Absolute : Inst4502NegNeg16<"orq", Opcode<0x0d>, Absolute>;
+def ASLQ_Absolute : Inst4502NegNeg16<"aslq", Opcode<0x0e>, Absolute>;
+def BITQ_Absolute : Inst4502NegNeg16<"bitq", Opcode<0x2c>, Absolute>;
+def ANDQ_Absolute : Inst4502NegNeg16<"andq", Opcode<0x2d>, Absolute>;
+def ROLQ_Absolute : Inst4502NegNeg16<"rolq", Opcode<0x2e>, Absolute>;
+def EORQ_Absolute : Inst4502NegNeg16<"eorq", Opcode<0x4d>, Absolute>;
+def LSRQ_Absolute : Inst4502NegNeg16<"lsrq", Opcode<0x4e>, Absolute>;
+def ADCQ_Absolute : Inst4502NegNeg16<"adcq", Opcode<0x6d>, Absolute>;
+def RORQ_Absolute : Inst4502NegNeg16<"rorq", Opcode<0x6e>, Absolute>;
+def STQ_Absolute : Inst4502NegNeg16<"stq", Opcode<0x8d>, Absolute>;
+def LDQ_Absolute : Inst4502NegNeg16<"ldq", Opcode<0xad>, Absolute>;
+def CMPQ_Absolute : Inst4502NegNeg16<"cmpq", Opcode<0xcd>, Absolute>;
+def DEQ_Absolute : Inst4502NegNeg16<"deq", Opcode<0xce>, Absolute>;
+def SBCQ_Absolute : Inst4502NegNeg16<"sbcq", Opcode<0xed>, Absolute>;
+def INQ_Absolute : Inst4502NegNeg16<"inq", Opcode<0xee>, Absolute>;
+
+/// Base page quad instructions, e.g. `orq $ea` (NEG NEG prefix, 4 bytes)
+def ORQ_BasePage : Inst4502NegNeg8<"orq", Opcode<0x05>, ZeroPage>;
+def ASLQ_BasePage : Inst4502NegNeg8<"aslq", Opcode<0x06>, ZeroPage>;
+def BITQ_BasePage : Inst4502NegNeg8<"bitq", Opcode<0x24>, ZeroPage>;
+def ANDQ_BasePage : Inst4502NegNeg8<"andq", Opcode<0x25>, ZeroPage>;
+def ROLQ_BasePage : Inst4502NegNeg8<"rolq", Opcode<0x26>, ZeroPage>;
+def ASRQ_BasePage : Inst4502NegNeg8<"asrq", Opcode<0x44>, ZeroPage>;
+def EORQ_BasePage : Inst4502NegNeg8<"eorq", Opcode<0x45>, ZeroPage>;
+def LSRQ_BasePage : Inst4502NegNeg8<"lsrq", Opcode<0x46>, ZeroPage>;
+def ADCQ_BasePage : Inst4502NegNeg8<"adcq", Opcode<0x65>, ZeroPage>;
+def RORQ_BasePage : Inst4502NegNeg8<"rorq", Opcode<0x66>, ZeroPage>;
+def STQ_BasePage : Inst4502NegNeg8<"stq", Opcode<0x85>, ZeroPage>;
+def LDQ_BasePage : Inst4502NegNeg8<"ldq", Opcode<0xa5>, ZeroPage>;
+def CMPQ_BasePage : Inst4502NegNeg8<"cmpq", Opcode<0xc5>, ZeroPage>;
+def DEQ_BasePage : Inst4502NegNeg8<"deq", Opcode<0xc6>, ZeroPage>;
+def SBCQ_BasePage : Inst4502NegNeg8<"sbcq", Opcode<0xe5>, ZeroPage>;
+def INQ_BasePage : Inst4502NegNeg8<"inq", Opcode<0xe6>, ZeroPage>;
+
+/// Indirect quad instructions e.g. `orq ($eq)` (NEG NEG prefix, 4 bytes)
+def ORQ_Indirect : Inst4502NegNeg8<"orq", Opcode<0x12>, Indirect>;
+def ANDQ_Indirect : Inst4502NegNeg8<"andq", Opcode<0x32>, Indirect>;
+def EORQ_Indirect : Inst4502NegNeg8<"eorq", Opcode<0x52>, Indirect>;
+def ADCQ_Indirect : Inst4502NegNeg8<"adcq", Opcode<0x72>, Indirect>;
+def STQ_Indirect : Inst4502NegNeg8<"stq", Opcode<0x92>, Indirect>;
+def CMPQ_Indirect : Inst4502NegNeg8<"cmpq", Opcode<0xd2>, Indirect>;
+def SBCQ_Indirect : Inst4502NegNeg8<"sbcq", Opcode<0xf2>, Indirect>;
+// E.g. `ldq ($ea), z` 
+def LDQ_IndirectZeroPageZ : Inst4502NegNeg8<"ldq", Opcode<0xb2>, IndirectZeroPageZ>;
+
+/// BasePage quad indexed instructions e.g. `orq $ea, x` (NEG NEG prefix, 4 bytes)
+def ASLQ_BasePageX : Inst4502NegNeg8<"aslq", Opcode<0x16>, ZeroPageX>;
+def ROLQ_BasePageX : Inst4502NegNeg8<"rolq", Opcode<0x36>, ZeroPageX>;
+def ASRQ_BasePageX : Inst4502NegNeg8<"asrq", Opcode<0x54>, ZeroPageX>;
+def LSRQ_BasePageX : Inst4502NegNeg8<"lsrq", Opcode<0x56>, ZeroPageX>;
+def RORQ_BasePageX : Inst4502NegNeg8<"rorq", Opcode<0x76>, ZeroPageX>;
+def DEQ_BasePageX : Inst4502NegNeg8<"deq", Opcode<0xd6>, ZeroPageX>;
+def INQ_BasePageX : Inst4502NegNeg8<"inq", Opcode<0xf6>, ZeroPageX>;
+
+/// Absolute quad indexed instructions e.g. `orq $eaea, x` (NEG NEG prefix, 5 bytes)
+def ASLQ_AbsoluteX : Inst4502NegNeg16<"aslq", Opcode<0x1e>, AbsoluteX>;
+def ROLQ_AbsoluteX : Inst4502NegNeg16<"rolq", Opcode<0x3e>, AbsoluteX>;
+def LSRQ_AbsoluteX : Inst4502NegNeg16<"lsrq", Opcode<0x5e>, AbsoluteX>;
+def RORQ_AbsoluteX : Inst4502NegNeg16<"rorq", Opcode<0x7e>, AbsoluteX>;
+def DEQ_AbsoluteX : Inst4502NegNeg16<"deq", Opcode<0xde>, AbsoluteX>;
+def INQ_AbsoluteX : Inst4502NegNeg16<"inq", Opcode<0xfe>, AbsoluteX>;
+}
+
+def : MnemonicAlias<"cpq", "cmpq">; // Allow ACME "cpq" style
+
+} // Predicates = [Has45GS02]
+
+let Predicates = [HasHUC6280] in {
+
+let DecoderNamespace = "huc6280" in {
+/// Swap, Clear Registers
+def SXY_Implied : InstLow2<"sxy", 0b0000>; /// Swap X and Y
+def SAX_Implied : InstLow2<"sax", 0b0010>; /// Swap A and X
+def SAY_Implied : InstLow2<"say", 0b0100>; /// Swap A and Y
+def CLA_Implied : InstLow2<"cla", 0b0110>; /// Clear A
+def CLX_Implied : InstLow2<"clx", 0b1000>; /// Clear X
+def CLY_Implied : InstLow2<"cly", 0b1100>; /// Clear Y
+
+/// VDC Control
+def ST0_Immediate : Inst16<"st0", Opcode<0x03>, Immediate>; /// Store to VDC Port 0
+def ST1_Immediate : Inst16<"st1", Opcode<0x13>, Immediate>; /// Store to VDC Port 1
+def ST2_Immediate : Inst16<"st2", Opcode<0x23>, Immediate>; /// Store to VDC Port 2
+
+/// Memory Control
+def TMA_Immediate : Inst16<"tma", Opcode<0x43>, Immediate>; /// Store Memory Mapping Register (Mask) in A
+def TAM_Immediate : Inst16<"tam", Opcode<0x53>, Immediate>; /// Store A in Memory Mapping Register (Mask)
+
+/// Block Move
+def TII_HuCBlockMove : InstHuCBlockMove<"tii", Opcode<0x73>>; /// Transfer Increment Increment
+def TDD_HuCBlockMove : InstHuCBlockMove<"tdd", Opcode<0xC3>>; /// Transfer Decrement Decrement
+def TIN_HuCBlockMove : InstHuCBlockMove<"tin", Opcode<0xD3>>; /// Transfer Increment None
+def TIA_HuCBlockMove : InstHuCBlockMove<"tia", Opcode<0xE3>>; /// Transfer Increment Alternate
+def TAI_HuCBlockMove : InstHuCBlockMove<"tai", Opcode<0xF3>>; /// Transfer Alternate Increment
+
+/// Test
+def TST_ZeroPage : InstImmediate24<"tst", Opcode<0x83>, ZeroPageAt2>; // Test Immediate with Zero Page
+def TST_Absolute : InstImmediate32<"tst", Opcode<0x93>, AbsoluteAt2>; // Test Immediate with Absolute
+def TST_ZeroPageX : InstImmediate24<"tst", Opcode<0xA3>, ZeroPageXAt2>; // Test Immediate with Zero Page, X
+def TST_AbsoluteX : InstImmediate32<"tst", Opcode<0xB3>, AbsoluteXAt2>; // Test Immediate with Absolute, X
+
+/// Relative Branch
+def BSR_Relative : Inst16<"bsr", Opcode<0x44>, Relative>, InstCall;
+
+/// CPU Control
+def CSL_Implied : InstLow4<"csl", 0b0101>; /// Set CPU Clock Low
+def CSH_Implied : InstLow4<"csh", 0b1101>; /// Set CPU Clock High
+def SET_Implied : InstLow4<"set", 0b1111>; /// Set T Flag
+}
+
+}
+
+let Predicates = [HasW65816Or65EL02] in {
+
+/// Direct P flag set/reset with mask immediate
+/// SEP REP
+/// E2  C2
+
+def SEP_Immediate : Inst16<"sep", OpcodeC2<0b111, 0b000>, Immediate>;
+def REP_Immediate : Inst16<"rep", OpcodeC2<0b110, 0b000>, Immediate>;
+
+/// 16-bit immediate opcode variants
+
+def BIT_Immediate16 : Inst24<"bit", Opcode<0x89>, Immediate16> {
+  let DecoderNamespace = "MOSMLow";
+  let MLow = 1;
+}
+
+def LDX_Immediate16 : Inst24<"ldx", OpcodeC2<0b101, 0b000>, Immediate16> {
+  let DecoderNamespace = "MOSXLow";
+  let XLow = 1;
+}
+
+/// 16-bit indexed-indirect jumps
+/// JSR
+/// FC
+
+def JSR_IndexedIndirect16 :
+    Inst24<"jsr", OpcodeC0<0b111, 0b111>, IndexedIndirect16>, InstCall {
+  let isIndirectBranch = true;
+}
+
+/// Stack manipulation instructions
+/// PEA PEI
+/// F4  D4
+
+def PEA_Absolute : Inst24<"pea", Opcode<0xF4>, Absolute>;
+def PEI_Indirect : Inst16<"pei", Opcode<0xD4>, Indirect>;
+
+/// Register transfer instructions
+/// TXY TYX
+/// 9B  BB
+
+def TXY_Implied : InstLowB<"txy", 0b1001>;
+def TYX_Implied : InstLowB<"tyx", 0b1011>;
+
+/// Register exchange instructions
+/// XBA XCE
+/// EB  FB
+
+def XBA_Implied : InstLowB<"xba", 0b1110>;
+def XCE_Implied : InstLowB<"xce", 0b1111>;
+
+} // Predicates = [HasW65816Or65EL02]
+
+let Predicates = [HasW65816] in {
+
+let DecoderNamespace = "w65816" in {
+/// Unconditional relative branch instruction
+/// BRL
+/// 82
+
+//def BRL_Relative16 : Inst24<"brl", OpcodeC2<0b100, 0b000>, Relative16>,
+//    InstUnconditionalBranch;
+
+/// 24-bit long-jumps
+/// JMP JSL
+/// 5C  22
+
+def JMP_AbsoluteLong : Inst32<"jmp", OpcodeC0<0b010, 0b111>, AbsoluteLong>,
+	InstUnconditionalBranch;
+def JSL_AbsoluteLong : Inst32<"jsl", OpcodeC2<0b001, 0b000>, AbsoluteLong>,
+	InstCall;
+
+/// Return from long-jump subroutine
+/// RTL
+/// 6B
+
+def RTL_Implied : Inst8<"rtl", OpcodeC3<0b011, 0b010>>, InstReturn;
+
+/// 16-bit indirect long-jump
+/// JML
+/// DC
+def JML_Indirect16 : Inst24<"jml", OpcodeC0<0b110, 0b111>, Indirect16>,
+	InstUnconditionalBranch {
+  let isIndirectBranch = true;
+}
+
+/// Memory moves
+/// MVN MVP
+/// 54  44
+
+def MVN_816MemoryMove : Inst816MemoryMove<"mvn", Opcode<0x54>>; // Move Negative
+def MVP_816MemoryMove : Inst816MemoryMove<"mvp", Opcode<0x44>>; // Move Positive
+
+/// Stack manipulation instructions
+/// PER PHB PHD PHK PLB PLD
+/// 62  8B  0B  4B  AB  2B
+
+def PER_Relative16 : Inst24<"per", Opcode<0x62>, Relative16>;
+def PHB_Implied : InstLowB<"phb", 0b1000>;
+def PHD_Implied : InstLowB<"phd", 0b0000>;
+def PHK_Implied : InstLowB<"phk", 0b0100>;
+def PLB_Implied : InstLowB<"plb", 0b1010>;
+def PLD_Implied : InstLowB<"pld", 0b0010>;
+
+/// Register transfer instructions
+/// TCD TCS TDC TSC
+/// 5B  1B  7B  3B
+
+def TCD_Implied : InstLowB<"tcd", 0b0101>;
+def TCS_Implied : InstLowB<"tcs", 0b0001>;
+def TDC_Implied : InstLowB<"tdc", 0b0111>;
+def TSC_Implied : InstLowB<"tsc", 0b0011>;
+
+def WDM_Immediate : Inst16<"wdm", Opcode<0x42>, Immediate>;
+}
+
+} // Predicates = [HasW65816]
+
+let Predicates = [Has65EL02] in {
+
+let DecoderNamespace = "65el02" in {
+def NXT_Implied : InstLow2<"nxt", 0b0000>;
+def ENT_Implied : InstLow2<"ent", 0b0010>;
+def NXA_Implied : InstLow2<"nxa", 0b0100>;
+
+def REA_Absolute : Inst24<"rea", Opcode<0x44>, Absolute>;
+def REI_Indirect : Inst16<"rei", Opcode<0x54>, Indirect>;
+
+def PER_Relative : Inst16<"per", Opcode<0x62>, Relative>;
+def RER_Relative : Inst16<"rer", Opcode<0x82>, Relative>;
+
+def RHI_Implied : InstLowB<"rhi", 0b0000>;
+def RHX_Implied : InstLowB<"rhx", 0b0001>;
+def RLI_Implied : InstLowB<"rli", 0b0010>;
+def RLX_Implied : InstLowB<"rlx", 0b0011>;
+def RHA_Implied : InstLowB<"rha", 0b0100>;
+def RHY_Implied : InstLowB<"rhy", 0b0101>;
+def RLA_Implied : InstLowB<"rla", 0b0110>;
+def RLY_Implied : InstLowB<"rly", 0b0111>;
+def TXR_Implied : InstLowB<"txr", 0b1000>;
+def TRX_Implied : InstLowB<"trx", 0b1010>;
+
+def TXI_Implied : Inst8<"txi", Opcode<0x5C>>;
+def TIX_Implied : Inst8<"tix", Opcode<0xDC>>;
+
+def MUL_ZeroPage_EL02  : Inst16<"mul", Opcode<0x0F>, ZeroPage>;
+def MUL_ZeroPageX_EL02 : Inst16<"mul", Opcode<0x1F>, ZeroPageX>;
+def MUL_Absolute_EL02  : Inst24<"mul", Opcode<0x2F>, Absolute>;
+def MUL_AbsoluteX_EL02 : Inst24<"mul", Opcode<0x3F>, AbsoluteX>;
+def DIV_ZeroPage_EL02  : Inst16<"div", Opcode<0x4F>, ZeroPage>;
+def DIV_ZeroPageX_EL02 : Inst16<"div", Opcode<0x5F>, ZeroPageX>;
+def DIV_Absolute_EL02  : Inst24<"div", Opcode<0x6F>, Absolute>;
+def DIV_AbsoluteX_EL02 : Inst24<"div", Opcode<0x7F>, AbsoluteX>;
+
+def ZEA_Implied : Inst8<"zea", Opcode<0x8F>>;
+def SEA_Implied : Inst8<"sea", Opcode<0x9F>>;
+def TDA_Implied : Inst8<"tda", Opcode<0xAF>>;
+def TAD_Implied : Inst8<"tad", Opcode<0xBF>>;
+def PLD_Implied_EL02 : Inst8<"pld", Opcode<0xCF>>;
+def PHD_Implied_EL02 : Inst8<"phd", Opcode<0xDF>>;
+def MMU_Immediate : Inst16<"mmu", Opcode<0xEF>, Immediate>;
+
+}
+
+} // Predicates = [Has65EL02]
+
+// Operand type for basic block and function labels.
+def label : Operand<OtherVT>;
+
+include "MOSInstrInfoTables.td"
+
+include "MOSInstrInfoSPC700.td"
+
+include "MOSInstrPseudos.td"
+include "MOSInstrLogical.td"
+include "MOSInstrGISel.td"
+//===-- MOSInstrInfoSPC700.td - SPC700 Instruction defs ----*- tablegen -*-===//
+//
+// Part of LLVM-MOS, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// This file describes the SPC700 instructions in TableGen format.
+//
+//===----------------------------------------------------------------------===//
+
+/// Sony developed a 6502-like CPU used, among other products, in the SPC700.
+/// For unknown reasons, while many of its opcodes map closely to those of
+/// the 6502, their encoding is completely different.
+
+class MOSSPC700<Instruction from, Instruction to> {
+  Instruction From = from;
+  Instruction To = to;
+}
+
+class MOSSPC700Mode<string MosInstPrefix, string InstPrefix, string Suffix>
+  : MOSSPC700<!cast<Instruction>(MosInstPrefix # Suffix),
+              !cast<Instruction>(InstPrefix # Suffix)>;
+
+/// == SPC700 addressing mode syntax ==
+
+def SPC700ZeroPageZeroPage : AddressingMode {
+  let OperandsStr = "$dest , $src";
+  let InOperandList = (ins addr8:$dest, addr8at2:$src);
+}
+
+def SPC700ZeroPageImmediate : AddressingMode {
+  let OperandsStr = "$dest , # $src";
+  let InOperandList = (ins addr8:$dest, imm8at2:$src);
+}
+
+def SPC700ZeroPageX : AddressingMode {
+  let OperandsStr = "$param + x";
+  let InOperandList = (ins addr8:$param);
+}
+
+def SPC700ZeroPageY : AddressingMode {
+  let OperandsStr = "$param + y";
+  let InOperandList = (ins addr8:$param);
+}
+
+def SPC700ZeroPageRelative : AddressingMode {
+  let OperandsStr = "$dest , $src";
+  let InOperandList = (ins addr8:$dest, pcrel8at2:$src);
+}
+
+def SPC700ZeroPageXRelative : AddressingMode {
+  let OperandsStr = "$dest + x , $src";
+  let InOperandList = (ins addr8:$dest, pcrel8at2:$src);
+}
+
+def SPC700AbsoluteX : AddressingMode {
+  let OperandsStr = "$param + x";
+  let InOperandList = (ins addr16:$param);
+}
+
+def SPC700AbsoluteY : AddressingMode {
+  let OperandsStr = "$param + y";
+  let InOperandList = (ins addr16:$param);
+}
+
+def SPC700IndirectXIndirectY : AddressingMode {
+  let OperandsStr = "( x ) , ( y )";
+  let InOperandList = (ins);
+}
+
+def SPC700IndirectX : AddressingMode {
+  let OperandsStr = "( x )";
+  let InOperandList = (ins);
+}
+
+def SPC700IndirectXAutoIncrement : AddressingMode {
+  let OperandsStr = "( x ) +";
+  let InOperandList = (ins);
+}
+
+def SPC700IndexedIndirect : AddressingMode {
+  let OperandsStr = "[ $param + x ]";
+  let InOperandList = (ins addr8:$param);
+}
+
+def SPC700IndexedIndirect16 : AddressingMode {
+  let OperandsStr = "[ $param + x ]";
+  let InOperandList = (ins addr16:$param);
+}
+
+def SPC700IndirectIndexed : AddressingMode {
+  let OperandsStr = "[ $param ] + y";
+  let InOperandList = (ins addr8:$param);
+}
+
+/// == SPC700 operand types ==
+
+/// A 13-bit address.
+class Addr13Operand<string name> : MOSAsmOperand<name>;
+
+class addr13at<int offset> : Operand<i32> {
+  let ParserMatchClass = Addr13Operand<"Addr13">;
+  let EncoderMethod = "encodeImm<MOS::Addr13, " # offset # ">";
+  let DecoderMethod = "decodeUImmOperand<13>";
+  let OperandType = "OPERAND_ADDR13";
+  let OperandNamespace = "MOSOp";
+  let Type = i16;
+}
+def addr13 : addr13at<1>;
+
+/// == SPC700 instruction formats ==
+
+class SPC700Inst8<string prefix, string suffix, Opcode op = DefaultOpcode,
+                  AddressingMode mode = Implicit> :
+    InstAddressMode<prefix, op, mode> {
+  let Size = 1;
+  bits<8> Inst;
+  let Inst{7-0} = opcode.op;
+  let AsmString = prefix # " " # mode.OperandsStr # " " # suffix;
+}
+
+class SPC700Inst16<string prefix, string suffix, Opcode op = DefaultOpcode,
+                   AddressingMode mode = Implicit> :
+    InstAddressMode<prefix, op, mode> {
+  let Size = 2;
+  bits<8> param;
+  bits<16> Inst;
+  let Inst{7-0} = opcode.op;
+  let Inst{15-8} = param;
+  let AsmString = prefix # " " # mode.OperandsStr # " " # suffix;
+}
+
+class SPC700Inst24<string prefix, string suffix, Opcode op = DefaultOpcode,
+                   AddressingMode mode = Implicit> :
+    InstAddressMode<prefix, op, mode> {
+  let Size = 3;
+  bits<16> param;
+  bits<24> Inst;
+  let Inst{7-0} = opcode.op;
+  let Inst{23-8} = param;
+  let AsmString = prefix # " " # mode.OperandsStr # " " # suffix;
+}
+
+class SPC700Inst24TwoOp<string prefix, string suffix, Opcode op = DefaultOpcode,
+                        AddressingMode mode = Implicit> :
+    InstAddressMode<prefix, op, mode> {
+  let Size = 3;
+  bits<8> dest;
+  bits<8> src;
+  bits<24> Inst;
+  let Inst{7-0} = opcode.op;
+  let Inst{15-8} = dest;
+  let Inst{23-16} = src;
+  let AsmString = prefix # " " # mode.OperandsStr # " " # suffix;
+}
+
+multiclass SPC700LoadStoreA<string prefix, string suffix, bits<3> aaa> {
+  def _ZeroPage :
+    SPC700Inst16<prefix, suffix, OpcodeABC<aaa, 0b001, 0b00>, ZeroPage>;
+
+  def _Absolute :
+    SPC700Inst24<prefix, suffix, OpcodeABC<aaa, 0b001, 0b01>, Absolute>;
+
+  def _IndirectX :
+    SPC700Inst8<prefix, suffix, OpcodeABC<aaa, 0b001, 0b10>, SPC700IndirectX>;
+
+  def _IndexedIndirect :
+    SPC700Inst16<prefix, suffix, OpcodeABC<aaa, 0b001, 0b11>, SPC700IndexedIndirect>;
+      
+  def _ZeroPageX :
+    SPC700Inst16<prefix, suffix, OpcodeABC<aaa, 0b101, 0b00>, SPC700ZeroPageX>;
+
+  def _AbsoluteX :
+    SPC700Inst24<prefix, suffix, OpcodeABC<aaa, 0b101, 0b01>, SPC700AbsoluteX>;
+
+  def _AbsoluteY :
+    SPC700Inst24<prefix, suffix, OpcodeABC<aaa, 0b101, 0b10>, SPC700AbsoluteY>;
+
+  def _IndirectIndexed :
+    SPC700Inst16<prefix, suffix, OpcodeABC<aaa, 0b101, 0b11>, SPC700IndirectIndexed>;
+}
+
+multiclass SPC700MosAliasLoadStoreA<string MosOpcodeStr, string InstPrefix> {
+  def : InstAlias<MosOpcodeStr # " $param", (!cast<Instruction>(InstPrefix # "_ZeroPage") addr8:$param)>;
+  def : InstAlias<MosOpcodeStr # " $param", (!cast<Instruction>(InstPrefix # "_Absolute") addr16:$param)>;
+  def : InstAlias<MosOpcodeStr # " ( x )", (!cast<Instruction>(InstPrefix # "_IndirectX"))>;
+  def : InstAlias<MosOpcodeStr # " ( $param , x )", (!cast<Instruction>(InstPrefix # "_IndexedIndirect") addr8:$param)>;
+  def : InstAlias<MosOpcodeStr # " $param , x", (!cast<Instruction>(InstPrefix # "_ZeroPageX") addr8:$param)>;
+  def : InstAlias<MosOpcodeStr # " $param , x", (!cast<Instruction>(InstPrefix # "_AbsoluteX") addr16:$param)>;
+  def : InstAlias<MosOpcodeStr # " $param , y", (!cast<Instruction>(InstPrefix # "_AbsoluteY") addr16:$param)>;
+  def : InstAlias<MosOpcodeStr # " ( $param ) , y", (!cast<Instruction>(InstPrefix # "_IndirectIndexed") addr8:$param)>;
+}
+
+multiclass SPC700MosSpcLoadStoreA<string MosInstPrefix, string InstPrefix> {
+  def : MOSSPC700Mode<MosInstPrefix, InstPrefix, "_ZeroPage">;
+  def : MOSSPC700Mode<MosInstPrefix, InstPrefix, "_Absolute">;
+  def : MOSSPC700Mode<MosInstPrefix, InstPrefix, "_IndexedIndirect">;
+  def : MOSSPC700Mode<MosInstPrefix, InstPrefix, "_ZeroPageX">;
+  def : MOSSPC700Mode<MosInstPrefix, InstPrefix, "_AbsoluteX">;
+  def : MOSSPC700Mode<MosInstPrefix, InstPrefix, "_AbsoluteY">;
+  def : MOSSPC700Mode<MosInstPrefix, InstPrefix, "_IndirectIndexed">;
+}
+
+multiclass SPC700LoadStoreX<string prefix, string suffix, bits<3> aaa> {
+  def _Absolute :
+    SPC700Inst24<prefix, suffix, OpcodeABC<aaa, 0b010, 0b01>, Absolute>;
+
+  def _ZeroPage :
+    SPC700Inst16<prefix, suffix, OpcodeABC<aaa, 0b110, 0b00>, ZeroPage>;
+
+  def _ZeroPageY :
+    SPC700Inst16<prefix, suffix, OpcodeABC<aaa, 0b110, 0b01>, SPC700ZeroPageY>;
+}
+
+multiclass SPC700MosAliasLoadStoreX<string MosOpcodeStr, string InstPrefix> {
+  def : InstAlias<MosOpcodeStr # " $param", (!cast<Instruction>(InstPrefix # "_Absolute") addr16:$param)>;
+  def : InstAlias<MosOpcodeStr # " $param", (!cast<Instruction>(InstPrefix # "_ZeroPage") addr8:$param)>;
+  def : InstAlias<MosOpcodeStr # " $param , y", (!cast<Instruction>(InstPrefix # "_ZeroPageY") addr8:$param)>;
+}
+
+multiclass SPC700MosSpcLoadStoreX<string MosInstPrefix, string InstPrefix> {
+  def : MOSSPC700Mode<MosInstPrefix, InstPrefix, "_Absolute">;
+  def : MOSSPC700Mode<MosInstPrefix, InstPrefix, "_ZeroPage">;
+  def : MOSSPC700Mode<MosInstPrefix, InstPrefix, "_ZeroPageY">;
+}
+
+multiclass SPC700LoadStoreY<string prefix, string suffix, bits<3> aaa> {
+  def _ZeroPage :
+    SPC700Inst16<prefix, suffix, OpcodeABC<aaa, 0b010, 0b11>, ZeroPage>;
+
+  def _Absolute :
+    SPC700Inst24<prefix, suffix, OpcodeABC<aaa, 0b011, 0b00>, Absolute>;
+
+  def _ZeroPageX :
+    SPC700Inst16<prefix, suffix, OpcodeABC<aaa, 0b110, 0b11>, SPC700ZeroPageX>;
+}
+
+multiclass SPC700MosAliasLoadStoreY<string MosOpcodeStr, string InstPrefix> {
+  def : InstAlias<MosOpcodeStr # " $param", (!cast<Instruction>(InstPrefix # "_ZeroPage") addr8:$param)>;
+  def : InstAlias<MosOpcodeStr # " $param", (!cast<Instruction>(InstPrefix # "_Absolute") addr16:$param)>;
+  def : InstAlias<MosOpcodeStr # " $param , x", (!cast<Instruction>(InstPrefix # "_ZeroPageX") addr8:$param)>;
+}
+
+multiclass SPC700MosSpcLoadStoreY<string MosInstPrefix, string InstPrefix> {
+  def : MOSSPC700Mode<MosInstPrefix, InstPrefix, "_ZeroPage">;
+  def : MOSSPC700Mode<MosInstPrefix, InstPrefix, "_Absolute">;
+  def : MOSSPC700Mode<MosInstPrefix, InstPrefix, "_ZeroPageX">;
+}
+
+multiclass SPC700Arithmetic<string OpcodeStr, bits<3> aaa>
+    : SPC700LoadStoreA<OpcodeStr # " a ,", "", aaa> {
+  def _Immediate :
+    SPC700Inst16<OpcodeStr # " a ,", "", OpcodeABC<aaa, 0b010, 0b00>, Immediate>;
+
+  def _ZeroPageZeroPage :
+    SPC700Inst24TwoOp<OpcodeStr, "", OpcodeABC<aaa, 0b010, 0b01>, SPC700ZeroPageZeroPage>;
+
+  def _ZeroPageImmediate :
+    SPC700Inst24TwoOp<OpcodeStr, "", OpcodeABC<aaa, 0b110, 0b00>, SPC700ZeroPageImmediate>;
+
+  def _IndirectXIndirectY :
+    SPC700Inst8<OpcodeStr, "", OpcodeABC<aaa, 0b110, 0b01>, SPC700IndirectXIndirectY>;
+}
+
+multiclass SPC700MosAliasArithmetic<string MosOpcodeStr, string InstPrefix>
+    : SPC700MosAliasLoadStoreA<MosOpcodeStr, InstPrefix> {
+  def : InstAlias<MosOpcodeStr # " #$param", (!cast<Instruction>(InstPrefix # "_Immediate") imm8:$param)>;
+}
+
+multiclass SPC700MosSpcArithmetic<string MosInstPrefix, string InstPrefix>
+    : SPC700MosSpcLoadStoreA<MosInstPrefix, InstPrefix> {
+  def : MOSSPC700Mode<MosInstPrefix, InstPrefix, "_Immediate">;
+}
+
+multiclass SPC700ShiftInc<string OpcodeStr, bits<3> aaa> {
+  def _ZeroPage :
+    SPC700Inst16<OpcodeStr, "", OpcodeABC<aaa, 0b010, 0b11>, ZeroPage>;
+
+  def _ZeroPageX :
+    SPC700Inst16<OpcodeStr, "", OpcodeABC<aaa, 0b110, 0b11>, SPC700ZeroPageX>;
+
+  def _Absolute :
+    SPC700Inst24<OpcodeStr, "", OpcodeABC<aaa, 0b011, 0b00>, Absolute>;
+
+  def _Accumulator :
+    SPC700Inst8<OpcodeStr, "a", OpcodeABC<aaa, 0b111, 0b00>, Accumulator>;
+}
+
+multiclass SPC700MosAliasShiftInc<string MosOpcodeStr, string InstPrefix> {
+  def : InstAlias<MosOpcodeStr, (!cast<Instruction>(InstPrefix # "_Accumulator"))>;
+  def : InstAlias<MosOpcodeStr # " $param , x", (!cast<Instruction>(InstPrefix # "_ZeroPageX") addr8:$param)>;
+}
+
+multiclass SPC700MosSpcShiftInc<string MosInstPrefix, string InstPrefix> {
+  def : MOSSPC700Mode<MosInstPrefix, InstPrefix, "_ZeroPage">;
+  def : MOSSPC700Mode<MosInstPrefix, InstPrefix, "_ZeroPageX">;
+  def : MOSSPC700Mode<MosInstPrefix, InstPrefix, "_Absolute">;
+  def : MOSSPC700Mode<MosInstPrefix, InstPrefix, "_Accumulator">;
+}
+
+class OpcodeSPC700Cmp<bits<1> a = 0, bits<1> b = 0>
+    : Opcode<0> {
+  let op{7-7} = 0;
+  let op{6-6} = a;
+  let op{5-5} = b;
+  let op{4-0} = 0x1E;
+}
+
+multiclass SPC700CmpE<string OpcodeStr, bits<1> a = 0> {
+  def _Absolute :
+    SPC700Inst24<OpcodeStr, "", OpcodeSPC700Cmp<a, 0>, Absolute>;
+
+  def _ZeroPage :
+    SPC700Inst16<OpcodeStr, "", OpcodeSPC700Cmp<a, 1>, ZeroPage>;
+}
+
+class OpcodeSPC700PushPop<bits<1> a = 0, bits<2> bb = 0, bits<5> ccccc = 0>
+    : Opcode<0> {
+  let op{7-7} = a;
+  let op{6-5} = bb;
+  let op{4-0} = ccccc;
+}
+
+multiclass SPC700PushPop<string OpcodeStr, bits<1> a, bits<5> ccccc> {
+  def _PSW :
+    SPC700Inst8<OpcodeStr, "psw", OpcodeSPC700PushPop<a, 0b00, ccccc>, Implicit>;
+  def _A :
+    SPC700Inst8<OpcodeStr, "a", OpcodeSPC700PushPop<a, 0b01, ccccc>, Implicit>;
+  def _X :
+    SPC700Inst8<OpcodeStr, "x", OpcodeSPC700PushPop<a, 0b10, ccccc>, Implicit>;
+  def _Y :
+    SPC700Inst8<OpcodeStr, "y", OpcodeSPC700PushPop<a, 0b11, ccccc>, Implicit>;
+}
+
+multiclass SPC700MosAliasPushPop<string MosOpcodeStr, string InstPrefix> {
+  def : InstAlias<MosOpcodeStr # "p", (!cast<Instruction>(InstPrefix # "_PSW"))>;
+  def : InstAlias<MosOpcodeStr # "a", (!cast<Instruction>(InstPrefix # "_A"))>;
+  def : InstAlias<MosOpcodeStr # "x", (!cast<Instruction>(InstPrefix # "_X"))>;
+  def : InstAlias<MosOpcodeStr # "y", (!cast<Instruction>(InstPrefix # "_Y"))>;
+}
+
+class SPC700InstBit13<string prefix, string suffix, Opcode op = DefaultOpcode> :
+    Inst<prefix> {
+  let Size = 3;
+  bits<24> Inst;
+  bits<3> tbit;
+  bits<13> source;
+
+  Opcode opcode = op;
+  let InOperandList = (ins addr13:$source, imm3:$tbit);
+  string OperandsStr;
+  let OperandsStr = "$source . $tbit";
+
+  let Inst{7-0} = opcode.op;
+  let Inst{20-8} = source;
+  let Inst{23-21} = tbit;
+  let AsmString = prefix # " " # OperandsStr # " " # suffix;
+}
+
+class SPC700InstBitBranch<string opcodestr, Opcode op = DefaultOpcode> :
+    Inst<opcodestr>, InstConditionalBranch {
+  let Size = 3;
+  bits<24> Inst;
+  bits<3> tbit;
+  bits<8> source;
+  bits<8> location;
+
+  Opcode opcode = op;
+  let InOperandList = (ins imm3:$tbit, addr8:$source, pcrel8at2:$location);
+  string OperandsStr;
+  let OperandsStr = "$source . $tbit , $location";
+
+  let Inst{7-5} = tbit;
+  let Inst{4-0} = opcode.op{4-0};
+  let Inst{15-8} = source;
+  let Inst{23-16} = location;
+  let AsmString = opcodestr # " " # OperandsStr;
+}
+
+class SPC700InstBitModify<string opcodestr, Opcode op = DefaultOpcode,
+                    AddressingMode mode = Implicit> :
+    InstAddressMode<opcodestr, op, mode> {
+  let Size = 2;
+  bits<8> param;
+  bits<16> Inst;
+  bits<3> tbit;
+
+  Opcode opcode = op;
+  let InOperandList = !con((ins imm3:$tbit), mode.InOperandList);
+  string OperandsStr;
+  let OperandsStr = mode.OperandsStr # " . $tbit";
+
+  let Inst{7-5} = tbit;
+  let Inst{4-0} = opcode.op{4-0};
+  let Inst{15-8} = param;
+  let AsmString = opcodestr # " " # OperandsStr;
+}
+
+/// == SPC700 opcode definitions ==
+
+let Predicates = [HasSPC700] in {
+let DecoderNamespace = "spc700" in {
+
+// x0 opcodes
+def SPC700_NOP_Implied : InstLow0<"nop", 0x0>;
+def SPC700_CLRP_Implied : InstLow0<"clrp", 0x2>;
+def SPC700_SETP_Implied : InstLow0<"setp", 0x4>;
+def SPC700_CLRC_Implied : InstLow0<"clrc", 0x6>;
+def SPC700_SETC_Implied : InstLow0<"setc", 0x8>;
+def SPC700_EI_Implied : InstLow0<"ei", 0xA>;
+def SPC700_DI_Implied : InstLow0<"di", 0xC>;
+def SPC700_CLRV_Implied : InstLow0<"clrv", 0xE>;
+
+def SPC700_BPL_Relative : ConditionalBranch<"bpl", 0b00, 0b0>;
+def SPC700_BMI_Relative : ConditionalBranch<"bmi", 0b00, 0b1>;
+def SPC700_BVC_Relative : ConditionalBranch<"bvc", 0b01, 0b0>;
+def SPC700_BVS_Relative : ConditionalBranch<"bvs", 0b01, 0b1>;
+def SPC700_BCC_Relative : ConditionalBranch<"bcc", 0b10, 0b0>;
+def SPC700_BCS_Relative : ConditionalBranch<"bcs", 0b10, 0b1>;
+def SPC700_BNE_Relative : ConditionalBranch<"bne", 0b11, 0b0>;
+def SPC700_BEQ_Relative : ConditionalBranch<"beq", 0b11, 0b1>;
+ 
+// x1 opcodes
+def SPC700_TCALL_Implied : Inst<"tcall $idx"> {
+  let Size = 1;
+  bits<8> Inst;
+  bits<4> idx;
+
+  let InOperandList = (ins imm4:$idx);
+  let Inst{7-4} = idx;
+  let Inst{3-0} = 1;
+}
+
+// x2, x3 opcodes
+def SPC700_SET1_ZeroPage : SPC700InstBitModify<"set1", Opcode<0x02>, ZeroPage>;
+def SPC700_CLR1_ZeroPage : SPC700InstBitModify<"clr1", Opcode<0x12>, ZeroPage>;
+def SPC700_BBS_ZeroPage : SPC700InstBitBranch<"bbs", Opcode<0x03>>;
+def SPC700_BBC_ZeroPage : SPC700InstBitBranch<"bbc", Opcode<0x13>>;
+
+// x4, x5, x6, x7, x8, x9 opcodes
+defm SPC700_OR : SPC700Arithmetic<"or", 0b000>;
+defm SPC700_AND : SPC700Arithmetic<"and", 0b001>;
+defm SPC700_EOR : SPC700Arithmetic<"eor", 0b010>;
+defm SPC700_CMP : SPC700Arithmetic<"cmp", 0b011>;
+defm SPC700_ADC : SPC700Arithmetic<"adc", 0b100>;
+defm SPC700_SBC : SPC700Arithmetic<"sbc", 0b101>;
+defm SPC700_STORE_A : SPC700LoadStoreA<"mov", " , a", 0b110>;
+defm SPC700_LOAD_A : SPC700LoadStoreA<"mov a, ", "", 0b111>;
+defm SPC700_STORE_X : SPC700LoadStoreX<"mov", " , x", 0b110>;
+defm SPC700_LOAD_X : SPC700LoadStoreX<"mov x, ", "", 0b111>;
+def SPC700_CMP_X_Immediate :
+  SPC700Inst16<"cmp x ,", "", OpcodeABC<0b110, 0b010, 0b00>, Immediate>;
+def SPC700_LOAD_A_Immediate :
+  SPC700Inst16<"mov a ,", "", OpcodeABC<0b111, 0b010, 0b00>, Immediate>;
+
+// xA
+def SPC700_OR1_C_Absolute : SPC700InstBit13<"or1 c ,", "", Opcode<0x0A>>;
+def SPC700_NOR1_C_Absolute : SPC700InstBit13<"or1 c , /", "", Opcode<0x2A>>;
+def SPC700_AND1_C_Absolute : SPC700InstBit13<"and1 c ,", "", Opcode<0x4A>>;
+def SPC700_NAND1_C_Absolute : SPC700InstBit13<"and1 c , /", "", Opcode<0x6A>>;
+def SPC700_EOR1_C_Absolute : SPC700InstBit13<"eor1 c ,", "", Opcode<0x8A>>;
+def SPC700_LOAD1_C_Absolute : SPC700InstBit13<"mov1 c ,", "", Opcode<0xAA>>;
+def SPC700_STORE1_C_Absolute : SPC700InstBit13<"mov1", ", c", Opcode<0xCA>>;
+def SPC700_NOT1_Absolute : SPC700InstBit13<"not1", "", Opcode<0xEA>>;
+def SPC700_DECW_ZeroPage : SPC700Inst16<"decw", "", Opcode<0x1A>, ZeroPage>;
+def SPC700_INCW_ZeroPage : SPC700Inst16<"incw", "", Opcode<0x3A>, ZeroPage>;
+def SPC700_CMPW_YA_ZeroPage
+    : SPC700Inst16<"cmpw ya ,", "", Opcode<0x5A>, ZeroPage>;
+def SPC700_ADDW_YA_ZeroPage
+    : SPC700Inst16<"addw ya ,", "", Opcode<0x7A>, ZeroPage>;
+def SPC700_SUBW_YA_ZeroPage
+    : SPC700Inst16<"subw ya ,", "", Opcode<0x9A>, ZeroPage>;
+def SPC700_LOAD_YA_ZeroPage
+    : SPC700Inst16<"movw ya ,", "", Opcode<0xBA>, ZeroPage>;
+def SPC700_STORE_YA_ZeroPage
+    : SPC700Inst16<"movw", ", ya", Opcode<0xDA>, ZeroPage>;
+def SPC700_MOV_ZeroPageZeroPage :
+  SPC700Inst24TwoOp<"mov", "", Opcode<0xFA>, SPC700ZeroPageZeroPage>;
+
+// xB, xC opcodes
+defm SPC700_ASL : SPC700ShiftInc<"asl", 0b000>;
+defm SPC700_ROL : SPC700ShiftInc<"rol", 0b001>;
+defm SPC700_LSR : SPC700ShiftInc<"lsr", 0b010>;
+defm SPC700_ROR : SPC700ShiftInc<"ror", 0b011>;
+defm SPC700_DEC : SPC700ShiftInc<"dec", 0b100>;
+defm SPC700_INC : SPC700ShiftInc<"inc", 0b101>;
+defm SPC700_STORE_Y : SPC700LoadStoreY<"mov", " , y", 0b110>;
+defm SPC700_LOAD_Y : SPC700LoadStoreY<"mov y, ", "", 0b111>;
+def SPC700_DEC_Y : Inst8<"dec y", Opcode<0xDC>>;
+def SPC700_INC_Y : Inst8<"inc y", Opcode<0xFC>>;
+
+// xD opcodes
+defm SPC700_PUSH : SPC700PushPop<"push", 0b0, 0x0D>;
+def SPC700_DEC_X : Inst8<"dec x", Opcode<0x1D>>;
+def SPC700_INC_X : Inst8<"inc x", Opcode<0x3D>>;
+def SPC700_MOV_X_A : Inst8<"mov x , a", Opcode<0x5D>>;
+def SPC700_MOV_A_X : Inst8<"mov a , x", Opcode<0x7D>>;
+def SPC700_LOAD_Y_Immediate : SPC700Inst16<"mov y ,", "", Opcode<0x8D>, Immediate>;
+def SPC700_MOV_X_SP : Inst8<"mov x , s", Opcode<0x9D>>;
+def SPC700_CMP_Y_Immediate : SPC700Inst16<"cmp y ,", "", Opcode<0xAD>, Immediate>;
+def SPC700_MOV_SP_X : Inst8<"mov s , x", Opcode<0xBD>>;
+def SPC700_LOAD_X_Immediate : SPC700Inst16<"mov x ,", "", Opcode<0xCD>, Immediate>;
+def SPC700_MOV_A_Y : Inst8<"mov a , y", Opcode<0xDD>>;
+def SPC700_NOTC_Implied : Inst8<"notc", Opcode<0xED>>;
+def SPC700_MOV_Y_A : Inst8<"mov y , a", Opcode<0xFD>>;
+
+// xE opcodes
+def SPC700_TSET1 : SPC700Inst24<"tset1", "", Opcode<0x0E>, Absolute>;
+defm SPC700_CMP_X : SPC700CmpE<"cmp x ,", 0>;
+def SPC700_CBNE_ZeroPageRelative
+  : SPC700Inst24TwoOp<"cbne", "", Opcode<0x2E>, SPC700ZeroPageRelative>;
+def SPC700_TCLR1 : SPC700Inst24<"tclr1", "", Opcode<0x4E>, Absolute>;
+defm SPC700_CMP_Y : SPC700CmpE<"cmp y ,", 1>;
+def SPC700_DBNZ_ZeroPageRelative
+  : SPC700Inst24TwoOp<"dbnz", "", Opcode<0x6E>, SPC700ZeroPageRelative>;
+defm SPC700_POP : SPC700PushPop<"pop", 0b1, 0x0E>;
+def SPC700_DIV_YA_X : Inst8<"div ya , x", Opcode<0x9E>>;
+def SPC700_DAS_A : Inst8<"das a", Opcode<0xBE>>;
+def SPC700_CBNE_ZeroPageXRelative
+  : SPC700Inst24TwoOp<"cbne", "", Opcode<0xDE>, SPC700ZeroPageXRelative>;
+def SPC700_DBNZ_Y_Relative
+  : SPC700Inst16<"dbnz y ,", "", Opcode<0xFE>, Relative>;
+
+// xF opcodes
+def SPC700_BRK_Implied : Inst8<"brk", Opcode<0x0F>>;
+def SPC700_JMP_IndexedIndirect16
+    : Inst24<"jmp", Opcode<0x1F>, SPC700IndexedIndirect16>, InstUnconditionalBranch {
+  let isIndirectBranch = true;  
+}
+def SPC700_BRA_Relative
+    : Inst16<"bra", Opcode<0x2F>, Relative>, InstUnconditionalBranch;
+def SPC700_CALL_Absolute : Inst24<"call", Opcode<0x3F>, Absolute>, InstCall;
+def SPC700_PCALL_LastPage : Inst16<"pcall", Opcode<0x4F>, ZeroPage>, InstCall;
+def SPC700_JMP_Absolute
+    : Inst24<"jmp", Opcode<0x5F>, Absolute>, InstUnconditionalBranch;
+def SPC700_RET_Implied : Inst8<"ret", Opcode<0x6F>>, InstReturn;
+def SPC700_RETI_Implied : Inst8<"reti", Opcode<0x7F>>, InstReturn;
+def SPC700_MOV_ZeroPageImmediate
+    : SPC700Inst24TwoOp<"mov", "", Opcode<0x8F>, SPC700ZeroPageImmediate>;
+def SPC700_XCN_A : Inst8<"xcn a", Opcode<0x9F>>;
+def SPC700_STORE_A_IndirectAutoIncrement
+    : SPC700Inst8<"mov", ", a", Opcode<0xAF>, SPC700IndirectXAutoIncrement>;
+def SPC700_LOAD_A_IndirectAutoIncrement
+    : SPC700Inst8<"mov a ,", "", Opcode<0xBF>, SPC700IndirectXAutoIncrement>;
+def SPC700_MUL_YA : Inst8<"mul ya", Opcode<0xCF>>;
+def SPC700_DAA_A : Inst8<"daa a", Opcode<0xDF>>;
+def SPC700_SLEEP_Implied : Inst8<"sleep", Opcode<0xEF>>;
+def SPC700_STOP_Implied : Inst8<"stop", Opcode<0xFF>>;
+
+} // DecoderNamespace = "spc700"
+
+// MOS aliases
+
+// x0 opcodes
+def : InstAlias<"clp", (SPC700_CLRP_Implied)>;
+def : InstAlias<"sep", (SPC700_SETP_Implied)>;
+def : InstAlias<"clc", (SPC700_CLRC_Implied)>;
+def : InstAlias<"sec", (SPC700_SETC_Implied)>;
+def : InstAlias<"cli", (SPC700_EI_Implied)>;
+def : InstAlias<"sei", (SPC700_DI_Implied)>;
+def : InstAlias<"clv", (SPC700_CLRV_Implied)>;
+
+// x2, x3 opcodes
+def : InstAlias<"bbr $tbit , $source , $location", (SPC700_BBC_ZeroPage imm3:$tbit, addr8:$source, pcrel8at2:$location)>;
+def : InstAlias<"bbs $tbit , $source , $location", (SPC700_BBS_ZeroPage imm3:$tbit, addr8:$source, pcrel8at2:$location)>;
+def : InstAlias<"rmb $tbit , $source", (SPC700_CLR1_ZeroPage imm3:$tbit, addr8:$source)>;
+def : InstAlias<"smb $tbit , $source", (SPC700_SET1_ZeroPage imm3:$tbit, addr8:$source)>;
+
+def : InstAlias<"bbr0 $source , $location", (SPC700_BBC_ZeroPage 0, addr8:$source, pcrel8at2:$location)>;
+def : InstAlias<"bbr1 $source , $location", (SPC700_BBC_ZeroPage 1, addr8:$source, pcrel8at2:$location)>;
+def : InstAlias<"bbr2 $source , $location", (SPC700_BBC_ZeroPage 2, addr8:$source, pcrel8at2:$location)>;
+def : InstAlias<"bbr3 $source , $location", (SPC700_BBC_ZeroPage 3, addr8:$source, pcrel8at2:$location)>;
+def : InstAlias<"bbr4 $source , $location", (SPC700_BBC_ZeroPage 4, addr8:$source, pcrel8at2:$location)>;
+def : InstAlias<"bbr5 $source , $location", (SPC700_BBC_ZeroPage 5, addr8:$source, pcrel8at2:$location)>;
+def : InstAlias<"bbr6 $source , $location", (SPC700_BBC_ZeroPage 6, addr8:$source, pcrel8at2:$location)>;
+def : InstAlias<"bbr7 $source , $location", (SPC700_BBC_ZeroPage 7, addr8:$source, pcrel8at2:$location)>;
+
+def : InstAlias<"bbs0 $source , $location", (SPC700_BBS_ZeroPage 0, addr8:$source, pcrel8at2:$location)>;
+def : InstAlias<"bbs1 $source , $location", (SPC700_BBS_ZeroPage 1, addr8:$source, pcrel8at2:$location)>;
+def : InstAlias<"bbs2 $source , $location", (SPC700_BBS_ZeroPage 2, addr8:$source, pcrel8at2:$location)>;
+def : InstAlias<"bbs3 $source , $location", (SPC700_BBS_ZeroPage 3, addr8:$source, pcrel8at2:$location)>;
+def : InstAlias<"bbs4 $source , $location", (SPC700_BBS_ZeroPage 4, addr8:$source, pcrel8at2:$location)>;
+def : InstAlias<"bbs5 $source , $location", (SPC700_BBS_ZeroPage 5, addr8:$source, pcrel8at2:$location)>;
+def : InstAlias<"bbs6 $source , $location", (SPC700_BBS_ZeroPage 6, addr8:$source, pcrel8at2:$location)>;
+def : InstAlias<"bbs7 $source , $location", (SPC700_BBS_ZeroPage 7, addr8:$source, pcrel8at2:$location)>;
+
+def : InstAlias<"rmb0 $source", (SPC700_CLR1_ZeroPage 0, addr8:$source)>;
+def : InstAlias<"rmb1 $source", (SPC700_CLR1_ZeroPage 1, addr8:$source)>;
+def : InstAlias<"rmb2 $source", (SPC700_CLR1_ZeroPage 2, addr8:$source)>;
+def : InstAlias<"rmb3 $source", (SPC700_CLR1_ZeroPage 3, addr8:$source)>;
+def : InstAlias<"rmb4 $source", (SPC700_CLR1_ZeroPage 4, addr8:$source)>;
+def : InstAlias<"rmb5 $source", (SPC700_CLR1_ZeroPage 5, addr8:$source)>;
+def : InstAlias<"rmb6 $source", (SPC700_CLR1_ZeroPage 6, addr8:$source)>;
+def : InstAlias<"rmb7 $source", (SPC700_CLR1_ZeroPage 7, addr8:$source)>;
+
+def : InstAlias<"smb0 $source", (SPC700_SET1_ZeroPage 0, addr8:$source)>;
+def : InstAlias<"smb1 $source", (SPC700_SET1_ZeroPage 1, addr8:$source)>;
+def : InstAlias<"smb2 $source", (SPC700_SET1_ZeroPage 2, addr8:$source)>;
+def : InstAlias<"smb3 $source", (SPC700_SET1_ZeroPage 3, addr8:$source)>;
+def : InstAlias<"smb4 $source", (SPC700_SET1_ZeroPage 4, addr8:$source)>;
+def : InstAlias<"smb5 $source", (SPC700_SET1_ZeroPage 5, addr8:$source)>;
+def : InstAlias<"smb6 $source", (SPC700_SET1_ZeroPage 6, addr8:$source)>;
+def : InstAlias<"smb7 $source", (SPC700_SET1_ZeroPage 7, addr8:$source)>;
+
+// x4, x5, x6, x7, x8, x9 opcodes
+defm : SPC700MosAliasArithmetic<"ora", "SPC700_OR">;
+defm : SPC700MosAliasArithmetic<"and", "SPC700_AND">;
+defm : SPC700MosAliasArithmetic<"eor", "SPC700_EOR">;
+defm : SPC700MosAliasArithmetic<"cmp", "SPC700_CMP">;
+defm : SPC700MosAliasArithmetic<"adc", "SPC700_ADC">;
+defm : SPC700MosAliasArithmetic<"sbc", "SPC700_SBC">;
+defm : SPC700MosAliasLoadStoreA<"sta", "SPC700_STORE_A">;
+defm : SPC700MosAliasLoadStoreA<"lda", "SPC700_LOAD_A">;
+defm : SPC700MosAliasLoadStoreX<"stx", "SPC700_STORE_X">;
+defm : SPC700MosAliasLoadStoreX<"ldx", "SPC700_LOAD_X">;
+def : InstAlias<"cpx #$param", (SPC700_CMP_X_Immediate imm8:$param)>;
+def : InstAlias<"lda #$param", (SPC700_LOAD_A_Immediate imm8:$param)>;
+
+// xB, xC opcodes
+defm : SPC700MosAliasShiftInc<"asl", "SPC700_ASL">;
+defm : SPC700MosAliasShiftInc<"rol", "SPC700_ROL">;
+defm : SPC700MosAliasShiftInc<"lsr", "SPC700_LSR">;
+defm : SPC700MosAliasShiftInc<"ror", "SPC700_ROR">;
+defm : SPC700MosAliasShiftInc<"dec", "SPC700_DEC">;
+defm : SPC700MosAliasShiftInc<"inc", "SPC700_INC">;
+def : InstAlias<"dey", (SPC700_DEC_Y)>;
+def : InstAlias<"iny", (SPC700_INC_Y)>;
+defm : SPC700MosAliasLoadStoreY<"sty", "SPC700_STORE_Y">;
+defm : SPC700MosAliasLoadStoreY<"ldy", "SPC700_LOAD_Y">;
+
+// xD opcodes
+defm : SPC700MosAliasPushPop<"ph", "SPC700_PUSH">;
+def : InstAlias<"dex", (SPC700_DEC_X)>;
+def : InstAlias<"inx", (SPC700_INC_X)>;
+def : InstAlias<"tax", (SPC700_MOV_X_A)>;
+def : InstAlias<"txa", (SPC700_MOV_A_X)>;
+def : InstAlias<"tsx", (SPC700_MOV_X_SP)>;
+def : InstAlias<"txs", (SPC700_MOV_SP_X)>;
+def : InstAlias<"tya", (SPC700_MOV_A_Y)>;
+def : InstAlias<"tay", (SPC700_MOV_Y_A)>;
+def : InstAlias<"ldx #$param", (SPC700_LOAD_X_Immediate imm8:$param)>;
+def : InstAlias<"ldy #$param", (SPC700_LOAD_Y_Immediate imm8:$param)>;
+def : InstAlias<"cpy #$param", (SPC700_CMP_Y_Immediate imm8:$param)>;
+
+// xE opcodes
+def : InstAlias<"cpx $param", (SPC700_CMP_X_ZeroPage addr8:$param)>;
+def : InstAlias<"cpy $param", (SPC700_CMP_Y_ZeroPage addr8:$param)>;
+def : InstAlias<"cpx $param", (SPC700_CMP_X_Absolute addr16:$param)>;
+def : InstAlias<"cpy $param", (SPC700_CMP_Y_Absolute addr16:$param)>;
+def : InstAlias<"tsb $addr", (SPC700_TSET1 addr16:$addr)>;
+def : InstAlias<"trb $addr", (SPC700_TCLR1 addr16:$addr)>;
+defm : SPC700MosAliasPushPop<"pl", "SPC700_POP">;
+def : InstAlias<"div", (SPC700_DIV_YA_X)>;
+def : InstAlias<"das", (SPC700_DAS_A)>;
+
+// xF opcodes
+def : InstAlias<"jsr $addr", (SPC700_CALL_Absolute addr16:$addr)>;
+def : InstAlias<"jmp ( $addr , x )", (SPC700_JMP_IndexedIndirect16 addr16:$addr)>;
+def : InstAlias<"rts", (SPC700_RET_Implied)>;
+def : InstAlias<"rti", (SPC700_RETI_Implied)>;
+def : InstAlias<"xcn", (SPC700_XCN_A)>;
+def : InstAlias<"mul", (SPC700_MUL_YA)>;
+def : InstAlias<"daa", (SPC700_DAA_A)>;
+def : InstAlias<"wai", (SPC700_SLEEP_Implied)>;
+def : InstAlias<"stp", (SPC700_STOP_Implied)>;
+
+} // Predicates = [HasSPC700]
+
+// Zero page relaxation table entries.
+
+def : ZPIRE< SPC700_ADC_ZeroPage, SPC700_ADC_Absolute >;
+def : ZPIRE< SPC700_ADC_ZeroPageX, SPC700_ADC_AbsoluteX >;
+def : ZPIRE< SPC700_AND_ZeroPage, SPC700_AND_Absolute >;
+def : ZPIRE< SPC700_AND_ZeroPageX, SPC700_AND_AbsoluteX >;
+def : ZPIRE< SPC700_ASL_ZeroPage, SPC700_ASL_Absolute >;
+def : ZPIRE< SPC700_CMP_ZeroPage, SPC700_CMP_Absolute >;
+def : ZPIRE< SPC700_CMP_ZeroPageX, SPC700_CMP_AbsoluteX >;
+def : ZPIRE< SPC700_CMP_X_ZeroPage, SPC700_CMP_X_Absolute >;
+def : ZPIRE< SPC700_CMP_Y_ZeroPage, SPC700_CMP_Y_Absolute >;
+def : ZPIRE< SPC700_DEC_ZeroPage, SPC700_DEC_Absolute >;
+def : ZPIRE< SPC700_EOR_ZeroPage, SPC700_EOR_Absolute >;
+def : ZPIRE< SPC700_EOR_ZeroPageX, SPC700_EOR_AbsoluteX >;
+def : ZPIRE< SPC700_INC_ZeroPage, SPC700_INC_Absolute >;
+def : ZPIRE< SPC700_LOAD_A_ZeroPage, SPC700_LOAD_A_Absolute >;
+def : ZPIRE< SPC700_LOAD_A_ZeroPageX, SPC700_LOAD_A_AbsoluteX >;
+def : ZPIRE< SPC700_LOAD_X_ZeroPage, SPC700_LOAD_X_Absolute >;
+def : ZPIRE< SPC700_LOAD_Y_ZeroPage, SPC700_LOAD_Y_Absolute >;
+def : ZPIRE< SPC700_STORE_A_ZeroPage, SPC700_STORE_A_Absolute >;
+def : ZPIRE< SPC700_STORE_A_ZeroPageX, SPC700_STORE_A_AbsoluteX >;
+def : ZPIRE< SPC700_STORE_X_ZeroPage, SPC700_STORE_X_Absolute >;
+def : ZPIRE< SPC700_STORE_Y_ZeroPage, SPC700_STORE_Y_Absolute >;
+def : ZPIRE< SPC700_LSR_ZeroPage, SPC700_LSR_Absolute >;
+def : ZPIRE< SPC700_OR_ZeroPage, SPC700_OR_Absolute >;
+def : ZPIRE< SPC700_OR_ZeroPageX, SPC700_OR_AbsoluteX >;
+def : ZPIRE< SPC700_ROL_ZeroPage, SPC700_ROL_Absolute >;
+def : ZPIRE< SPC700_ROR_ZeroPage, SPC700_ROR_Absolute >;
+def : ZPIRE< SPC700_SBC_ZeroPage, SPC700_SBC_Absolute >;
+def : ZPIRE< SPC700_SBC_ZeroPageX, SPC700_SBC_AbsoluteX >;
+
+// MOS -> SPC700 translation table.
+
+// x0 opcodes
+def : MOSSPC700<CLC_Implied, SPC700_CLRC_Implied>;
+def : MOSSPC700<SEC_Implied, SPC700_SETC_Implied>;
+def : MOSSPC700<CLI_Implied, SPC700_EI_Implied>;
+def : MOSSPC700<SEI_Implied, SPC700_DI_Implied>;
+def : MOSSPC700<CLV_Implied, SPC700_CLRV_Implied>;
+
+// x2, x3 opcodes
+def : MOSSPC700<BBR_ZeroPage, SPC700_BBC_ZeroPage>;
+def : MOSSPC700<BBS_ZeroPage, SPC700_BBS_ZeroPage>;
+def : MOSSPC700<RMB_ZeroPage, SPC700_CLR1_ZeroPage>;
+def : MOSSPC700<SMB_ZeroPage, SPC700_SET1_ZeroPage>;
+
+// x4, x5, x6, x7, x8, x9 opcodes
+defm : SPC700MosSpcArithmetic<"ORA", "SPC700_OR">;
+defm : SPC700MosSpcArithmetic<"AND", "SPC700_AND">;
+defm : SPC700MosSpcArithmetic<"EOR", "SPC700_EOR">;
+defm : SPC700MosSpcArithmetic<"CMP", "SPC700_CMP">;
+defm : SPC700MosSpcArithmetic<"ADC", "SPC700_ADC">;
+defm : SPC700MosSpcArithmetic<"SBC", "SPC700_SBC">;
+defm : SPC700MosSpcLoadStoreA<"STA", "SPC700_STORE_A">;
+defm : SPC700MosSpcLoadStoreA<"LDA", "SPC700_LOAD_A">;
+defm : SPC700MosSpcLoadStoreX<"STX", "SPC700_STORE_X">;
+defm : SPC700MosSpcLoadStoreX<"LDX", "SPC700_LOAD_X">;
+def : MOSSPC700<CPX_Immediate, SPC700_CMP_X_Immediate>;
+def : MOSSPC700<LDA_Immediate, SPC700_LOAD_A_Immediate>;
+
+// xB, xC opcodes
+defm : SPC700MosSpcShiftInc<"ASL", "SPC700_ASL">;
+defm : SPC700MosSpcShiftInc<"ROL", "SPC700_ROL">;
+defm : SPC700MosSpcShiftInc<"LSR", "SPC700_LSR">;
+defm : SPC700MosSpcShiftInc<"ROR", "SPC700_ROR">;
+defm : SPC700MosSpcShiftInc<"DEC", "SPC700_DEC">;
+defm : SPC700MosSpcShiftInc<"INC", "SPC700_INC">;
+def : MOSSPC700<DEY_Implied, SPC700_DEC_Y>;
+def : MOSSPC700<INY_Implied, SPC700_INC_Y>;
+defm : SPC700MosSpcLoadStoreY<"STY", "SPC700_STORE_Y">;
+defm : SPC700MosSpcLoadStoreY<"LDY", "SPC700_LOAD_Y">;
+
+// xD opcodes
+def : MOSSPC700<PHP_Implied, SPC700_PUSH_PSW>;
+def : MOSSPC700<PHA_Implied, SPC700_PUSH_A>;
+def : MOSSPC700<PHX_Implied, SPC700_PUSH_X>;
+def : MOSSPC700<PHY_Implied, SPC700_PUSH_Y>;
+def : MOSSPC700<DEX_Implied, SPC700_DEC_X>;
+def : MOSSPC700<INX_Implied, SPC700_INC_X>;
+def : MOSSPC700<TAX_Implied, SPC700_MOV_X_A>;
+def : MOSSPC700<TXA_Implied, SPC700_MOV_A_X>;
+def : MOSSPC700<TSX_Implied, SPC700_MOV_X_SP>;
+def : MOSSPC700<TXS_Implied, SPC700_MOV_SP_X>;
+def : MOSSPC700<TYA_Implied, SPC700_MOV_A_Y>;
+def : MOSSPC700<TAY_Implied, SPC700_MOV_Y_A>;
+def : MOSSPC700<LDX_Immediate, SPC700_LOAD_X_Immediate>;
+def : MOSSPC700<LDY_Immediate, SPC700_LOAD_Y_Immediate>;
+def : MOSSPC700<CPY_Immediate, SPC700_CMP_Y_Immediate>;
+
+// xE opcodes
+def : MOSSPC700<CPX_ZeroPage, SPC700_CMP_X_ZeroPage>;
+def : MOSSPC700<CPY_ZeroPage, SPC700_CMP_Y_ZeroPage>;
+def : MOSSPC700<CPX_Absolute, SPC700_CMP_X_Absolute>;
+def : MOSSPC700<CPY_Absolute, SPC700_CMP_Y_Absolute>;
+def : MOSSPC700<TSB_Absolute, SPC700_TSET1>;
+def : MOSSPC700<TRB_Absolute, SPC700_TCLR1>;
+def : MOSSPC700<PLP_Implied, SPC700_POP_PSW>;
+def : MOSSPC700<PLA_Implied, SPC700_POP_A>;
+def : MOSSPC700<PLX_Implied, SPC700_POP_X>;
+def : MOSSPC700<PLY_Implied, SPC700_POP_Y>;
+
+// xF opcodes
+def : MOSSPC700<BRA_Relative, SPC700_BRA_Relative>;
+def : MOSSPC700<JSR_Absolute, SPC700_CALL_Absolute>;
+def : MOSSPC700<JMP_IndexedIndirect, SPC700_JMP_IndexedIndirect16>;
+def : MOSSPC700<RTS_Implied, SPC700_RET_Implied>;
+def : MOSSPC700<RTI_Implied, SPC700_RETI_Implied>;
+def : MOSSPC700<WAI_Implied, SPC700_SLEEP_Implied>;
+def : MOSSPC700<STP_Implied, SPC700_STOP_Implied>;
+
+def MOSSPC700Table : GenericTable {
+  let FilterClass = "MOSSPC700";
+  let CppTypeName = "MOSSPC700Entry";
+  let Fields = ["From", "To"];
+
+  let PrimaryKey = ["From"];
+  let PrimaryKeyName = "getMOSSPC700Entry";
+}
+//===-- MOSInstrInfoTables.td - MOS Instruction tables -----*- tablegen -*-===//
+//
+// Part of LLVM-MOS, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// This file describes MOS constant tables in TableGen format.
+//
+//===----------------------------------------------------------------------===//
+
+include "llvm/TableGen/SearchableTable.td"
+
+/// ---------------------------------------------------------------------------
+/// A MOS instruction relaxation entry.  Used primarily to relax 8 bit
+/// instructions that access zero page, to 16 bit equivalents, if the 
+/// target addresses do not necessarily reside in 8 bit memory. The same
+/// pattern is used to further relax 16 bit zero bank instructions into
+/// 24 bit equivalents for 65816.
+///
+/// On 65CE02, this is also used to relax branch operations.
+class MOSRelaxationEntry< InstAddressMode from, 
+                          InstAddressMode to> {
+  InstAddressMode From = from;
+  InstAddressMode To = to;
+}
+
+/// MOS zero page/bank instruction relaxation entries.
+
+class ZeroPageInstructionRelaxationEntry< InstAddressMode from, 
+                                          InstAddressMode to> :
+                                          MOSRelaxationEntry<from, to>;
+
+class ZeroBankInstructionRelaxationEntry< InstAddressMode from, 
+                                          InstAddressMode to> :
+                                          MOSRelaxationEntry<from, to>;
+
+
+class ZPIRE< InstAddressMode from, InstAddressMode to> :
+	ZeroPageInstructionRelaxationEntry< from, to >;
+
+class ZBIRE< InstAddressMode from, InstAddressMode to> :
+	ZeroBankInstructionRelaxationEntry< from, to >;
+
+def : ZPIRE< ADC_ZeroPage, ADC_Absolute >;
+def : ZBIRE< ADC_Absolute, ADC_AbsoluteLong >;
+def : ZPIRE< ADC_ZeroPageX, ADC_AbsoluteX >;
+def : ZBIRE< ADC_AbsoluteX, ADC_AbsoluteXLong >;
+
+def : ZPIRE< AND_ZeroPage, AND_Absolute >;
+def : ZBIRE< AND_Absolute, AND_AbsoluteLong >;
+def : ZPIRE< AND_ZeroPageX, AND_AbsoluteX >;
+def : ZBIRE< AND_AbsoluteX, AND_AbsoluteXLong >;
+
+def : ZPIRE< ASL_ZeroPage, ASL_Absolute >;
+def : ZPIRE< ASL_ZeroPageX, ASL_AbsoluteX >;
+
+def : ZPIRE< BIT_ZeroPage, BIT_Absolute >;
+def : ZPIRE< BIT_ZeroPageX, BIT_AbsoluteX >;
+
+def : ZPIRE< CMP_ZeroPage, CMP_Absolute >;
+def : ZBIRE< CMP_Absolute, CMP_AbsoluteLong >;
+def : ZPIRE< CMP_ZeroPageX, CMP_AbsoluteX >;
+def : ZBIRE< CMP_AbsoluteX, CMP_AbsoluteXLong >;
+
+def : ZPIRE< CPX_ZeroPage, CPX_Absolute >;
+
+def : ZPIRE< CPY_ZeroPage, CPY_Absolute >;
+
+def : ZPIRE< CPZ_ZeroPage, CPZ_Absolute >;
+
+def : ZPIRE< DCP_ZeroPage, DCP_Absolute >;
+def : ZPIRE< DCP_ZeroPageX, DCP_AbsoluteX >;
+
+def : ZPIRE< DEC_ZeroPage, DEC_Absolute >;
+def : ZPIRE< DEC_ZeroPageX, DEC_AbsoluteX >;
+
+def : ZPIRE< EOR_ZeroPage, EOR_Absolute >;
+def : ZBIRE< EOR_Absolute, EOR_AbsoluteLong >;
+def : ZPIRE< EOR_ZeroPageX, EOR_AbsoluteX >;
+def : ZBIRE< EOR_AbsoluteX, EOR_AbsoluteXLong >;
+
+def : ZPIRE< INC_ZeroPage, INC_Absolute >;
+def : ZPIRE< INC_ZeroPageX, INC_AbsoluteX >;
+
+def : ZPIRE< ISC_ZeroPage, ISC_Absolute >;
+def : ZPIRE< ISC_ZeroPageX, ISC_AbsoluteX >;
+
+def : ZPIRE< LDA_ZeroPage, LDA_Absolute >;
+def : ZBIRE< LDA_Absolute, LDA_AbsoluteLong >;
+def : ZPIRE< LDA_ZeroPageX, LDA_AbsoluteX >;
+def : ZBIRE< LDA_AbsoluteX, LDA_AbsoluteXLong >;
+
+def : ZPIRE< LDX_ZeroPage, LDX_Absolute >;
+def : ZPIRE< LDX_ZeroPageY, LDX_AbsoluteY >;
+
+def : ZPIRE< LDY_ZeroPage, LDY_Absolute >;
+def : ZPIRE< LDY_ZeroPageX, LDY_AbsoluteX >;
+
+def : ZPIRE< LSR_ZeroPage, LSR_Absolute >;
+def : ZPIRE< LSR_ZeroPageX, LSR_AbsoluteX >;
+
+def : ZPIRE< ORA_ZeroPage, ORA_Absolute >;
+def : ZBIRE< ORA_Absolute, ORA_AbsoluteLong >;
+def : ZPIRE< ORA_ZeroPageX, ORA_AbsoluteX >;
+def : ZBIRE< ORA_AbsoluteX, ORA_AbsoluteXLong >;
+
+def : ZPIRE< RLA_ZeroPage, RLA_Absolute >;
+def : ZPIRE< RLA_ZeroPageX, RLA_AbsoluteX >;
+
+def : ZPIRE< ROL_ZeroPage, ROL_Absolute >;
+def : ZPIRE< ROL_ZeroPageX, ROL_AbsoluteX >;
+
+def : ZPIRE< ROR_ZeroPage, ROR_Absolute >;
+def : ZPIRE< ROR_ZeroPageX, ROR_AbsoluteX >;
+
+def : ZPIRE< RRA_ZeroPage, RRA_Absolute >;
+def : ZPIRE< RRA_ZeroPageX, RRA_AbsoluteX >;
+
+def : ZPIRE< SBC_ZeroPage, SBC_Absolute >;
+def : ZBIRE< SBC_Absolute, SBC_AbsoluteLong >;
+def : ZPIRE< SBC_ZeroPageX, SBC_AbsoluteX >;
+def : ZBIRE< SBC_AbsoluteX, SBC_AbsoluteXLong >;
+
+def : ZPIRE< SLO_ZeroPage, SLO_Absolute >;
+def : ZPIRE< SLO_ZeroPageX, SLO_AbsoluteX >;
+
+def : ZPIRE< SRE_ZeroPage, SRE_Absolute >;
+def : ZPIRE< SRE_ZeroPageX, SRE_AbsoluteX >;
+
+def : ZPIRE< STA_ZeroPage, STA_Absolute >;
+def : ZBIRE< STA_Absolute, STA_AbsoluteLong >;
+def : ZPIRE< STA_ZeroPageX, STA_AbsoluteX >;
+def : ZBIRE< STA_AbsoluteX, STA_AbsoluteXLong >;
+
+def : ZPIRE< STX_ZeroPage, STX_Absolute >;
+def : ZPIRE< STX_ZeroPageY, STX_AbsoluteY >;
+
+def : ZPIRE< STY_ZeroPage, STY_Absolute >;
+def : ZPIRE< STY_ZeroPageX, STY_AbsoluteX >;
+
+def : ZPIRE< STZ_ZeroPage, STZ_Absolute >;
+def : ZPIRE< STZ_ZeroPageX, STZ_AbsoluteX >;
+
+def : ZPIRE< TRB_ZeroPage, TRB_Absolute >;
+
+def : ZPIRE< TSB_ZeroPage, TSB_Absolute >;
+
+def : ZPIRE< TST_ZeroPage, TST_Absolute >;
+def : ZPIRE< TST_ZeroPageX, TST_AbsoluteX >;
+
+def : ZPIRE< MUL_ZeroPage_EL02, MUL_Absolute_EL02 >;
+def : ZPIRE< MUL_ZeroPageX_EL02, MUL_AbsoluteX_EL02 >;
+def : ZPIRE< DIV_ZeroPage_EL02, DIV_Absolute_EL02 >;
+def : ZPIRE< DIV_ZeroPageX_EL02, DIV_AbsoluteX_EL02 >;
+
+/// MOS branch instruction relaxation entries.
+
+class BranchInstructionRelaxationEntry< InstAddressMode from,
+                                        InstAddressMode to> :
+                                        MOSRelaxationEntry<from, to>;
+
+class BIRE< InstAddressMode from, InstAddressMode to> :
+	BranchInstructionRelaxationEntry< from, to >;
+
+def : BIRE< BCC_Relative, BCC_Relative16 >;
+def : BIRE< BCS_Relative, BCS_Relative16 >;
+def : BIRE< BEQ_Relative, BEQ_Relative16 >;
+def : BIRE< BMI_Relative, BMI_Relative16 >;
+def : BIRE< BNE_Relative, BNE_Relative16 >;
+def : BIRE< BPL_Relative, BPL_Relative16 >;
+def : BIRE< BRA_Relative, BRA_Relative16 >;
+def : BIRE< BVC_Relative, BVC_Relative16 >;
+def : BIRE< BVS_Relative, BVS_Relative16 >;
+
+/// ---------------------------------------------------------------------------
+/// MOS instruction lowering tables.
+class MOSRelaxationTable : GenericTable {
+  let FilterClass = NAME # "Entry";
+  let CppTypeName = "InstructionRelaxationEntry";
+  let Fields = ["From", "To"];
+
+  let PrimaryKey = ["From"];
+  let PrimaryKeyName = "get" # NAME # "Entry";
+}
+
+def ZeroPageInstructionRelaxation : MOSRelaxationTable;
+def ZeroBankInstructionRelaxation : MOSRelaxationTable;
+def BranchInstructionRelaxation : MOSRelaxationTable;
+//===-- MOSInstrLogical.td - Describe MOS Logical Instrs --*- tablegen -*-===//
+//
+// Part of LLVM-MOS, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===---------------------------------------------------------------------===//
+//
+// This file describes the MOS logical instruction set.
+//
+// When viewed logically, the 6502 instruction set is more regular than it might
+// appear. For example, consider the three instructions: LDA #imm, LDX #imm, and
+// LDY #imm. Each of these instructions takes a single immediate operand, loads
+// one of A, X, or Y, and sets NZ based on the immediate value. Even though
+// there are three separate opcodes, the only difference in their behavior is
+// which register is loaded.
+//
+// The logical instruction set merges these instructions together into a single
+// logical LDImm #imm instruction. The logical instruction takes a "GPR"
+// register class as an argument. When the logical instructions are lowered to
+// real instructions in AsmPrinter, the register operand is examined to
+// determine which real instruction is emitted. This scheme comes with some
+// considerable advantages.
+//
+// First, selecting a LDImm instruction doesn't constrain where the destination
+// can be placed other than that it needs to be one of A, X, or Y. This allows
+// earlier passes that cannot effectively make such decisions to defer them to
+// the register allocator.
+//
+// Second, the description of the side effects and characteristics of LDImm only
+// need to be specified once. Any switch() statements need to have only one
+// entry for LDImm, not three for LDAImm, LDXImm, and LDYImm. This considerably
+// reduces the amount of code needed to cover the 6502 instruction set.
+//
+// Third, exposing these regularities to LLVM passes make the 6502 more like a
+// regular CISC target (X86-ish). LLVM already has very good code paths for
+// dealing with this sort of architecture, and maintaining a logical instruction
+// set allows us to stay within those "sane", well-tested code paths, for the
+// most part.
+//
+// By examining its register operands, every logical instruction can be mapped
+// to exactly one real target instruction. Pseudoinstructions where this
+// property does not hold are recorded in MOSInstrPseudos.td instead. These are
+// more traditional pseudo-instructions; they may expand out to short snippets
+// of code required to perform higher-level operations that cannot be expaneded
+// inline, for one reason or another.
+//
+// All instructions take 1-register register classes for fixed operands: e.g.
+// Ac, Xc, Yc, etc. This allows the each instruction to natively use virtual
+// registers that can be resolved by the register allocator or register
+// scavenger. NZ is modeled implicitly for the most part; too many instructions
+// clobber it for it to be useful outside very specific scenarios.
+//
+//===---------------------------------------------------------------------===//
+
+class MOSLogicalInstr : Instruction {
+  let Namespace = "MOS";
+
+  dag OutOperandList = (outs);
+  dag InOperandList = (ins);
+
+  let hasSideEffects = false;
+  let mayLoad = false;
+  let mayStore = false;
+  let isPseudo = true;
+  let isCodeGenOnly = true;
+  let isReMaterializable = true;
+}
+
+//===---------------------------------------------------------------------===//
+// Addition/Subtraction Instructions
+//===---------------------------------------------------------------------===//
+
+class MOSAddSub : MOSLogicalInstr {
+  dag OutOperandList = (outs Ac:$dst, Cc:$carryout, Vc:$vout);
+  let Constraints = "$dst = $l, $carryout = $carryin";
+}
+class MOSAddSubOp<Operand op> : MOSAddSub {
+  dag InOperandList = (ins Ac:$l, op:$r, Cc:$carryin);
+}
+class MOSAddSubRC<RegisterClass rc> : MOSAddSub {
+  dag InOperandList = (ins Ac:$l, rc:$r, Cc:$carryin);
+}
+
+let isAdd = true in {
+  def ADCImm : MOSAddSubOp<imm8>, PseudoInstExpansion<(ADC_Immediate imm8:$r)>;
+  def ADCImag8 : MOSAddSubRC<Imag8>, PseudoInstExpansion<(ADC_ZeroPage addr8:$r)> {
+    // Don't give the carries a tied constraint, since having two tied operands
+    // inhibits commutation of $l and $r.
+    let Constraints = "$dst = $l";
+    let isCommutable = true;
+  }
+  let mayLoad = true in {
+    def ADCZpIdx : MOSAddSub {
+      dag InOperandList = (ins Ac:$l, addr8:$addr, Xc:$idx, Cc:$carryin);
+    }
+    def ADCAbs :
+      MOSAddSubOp<addr16>, PseudoInstExpansion<(ADC_ZeroPage addr8:$r)>;
+    def ADCAbsIdx : MOSAddSub {
+      dag InOperandList = (ins Ac:$l, addr16:$addr, XY:$idx, Cc:$carryin);
+    }
+    def ADCIndir :
+        MOSAddSub, PseudoInstExpansion<(ADC_Indirect addr8:$addr)> {
+      let Predicates = [Has65C02];
+      dag InOperandList = (ins Ac:$l, Imag16:$addr, Cc:$carryin);
+    }
+    def ADCIndirIdx :
+        MOSAddSub, PseudoInstExpansion<(ADC_IndirectIndexed addr8:$addr)> {
+      dag InOperandList = (ins Ac:$l, Imag16:$addr, Yc:$idx, Cc:$carryin);
+    }
+  }
+}
+
+def SBCImm : MOSAddSubOp<imm8>, PseudoInstExpansion<(SBC_Immediate imm8:$r)>;
+def SBCImag8 : MOSAddSubRC<Imag8>, PseudoInstExpansion<(SBC_ZeroPage addr8:$r)>;
+let mayLoad = true in {
+  def SBCZpIdx : MOSAddSub {
+    dag InOperandList = (ins Ac:$l, addr8:$addr, Xc:$idx, Cc:$carryin);
+  }
+  def SBCAbs :
+      MOSAddSubOp<addr16>, PseudoInstExpansion<(SBC_ZeroPage addr8:$r)>;
+  def SBCAbsIdx : MOSAddSub {
+    dag InOperandList = (ins Ac:$l, addr16:$addr, XY:$idx, Cc:$carryin);
+  }
+  def SBCIndir :
+      MOSAddSub, PseudoInstExpansion<(SBC_Indirect addr8:$addr)> {
+    let Predicates = [Has65C02];
+    dag InOperandList = (ins Ac:$l, Imag16:$addr, Cc:$carryin);
+  }
+  def SBCIndirIdx :
+      MOSAddSub, PseudoInstExpansion<(SBC_IndirectIndexed addr8:$addr)> {
+    dag InOperandList = (ins Ac:$l, Imag16:$addr, Yc:$idx, Cc:$carryin);
+  }
+}
+
+//===---------------------------------------------------------------------===//
+// Bitwise instructions
+//===---------------------------------------------------------------------===//
+
+class MOSBitwiseBase : MOSLogicalInstr {
+  let OutOperandList = (outs Ac:$dst);
+  let Constraints = "$dst = $l";
+}
+
+multiclass MOSBitwiseInstr<SDNode node> {
+  def Imm :
+      MOSBitwiseBase,
+      PseudoInstExpansion<(!cast<Instruction>(NAME#"_Immediate") imm8:$r)> {
+    let OutOperandList = (outs Ac:$dst);
+    let InOperandList = (ins Ac:$l, imm8:$r);
+
+    let Pattern = [(set Ac:$dst, (node Ac:$l, imm:$r))];
+  }
+
+  def Imag8 :
+      MOSBitwiseBase,
+      PseudoInstExpansion<(!cast<Instruction>(NAME#"_ZeroPage") addr8:$r)> {
+    let InOperandList = (ins Ac:$l, Imag8:$r);
+
+    let Pattern = [(set Ac:$dst, (node Ac:$l, Imag8:$r))];
+
+    let isCommutable = true;
+  }
+
+  let mayLoad = true in {
+    def ZpIdx : MOSBitwiseBase {
+      let InOperandList = (ins Ac:$l, addr8:$addr, Xc:$idx);
+    }
+
+    def Abs :
+        MOSBitwiseBase,
+        PseudoInstExpansion<(!cast<Instruction>(NAME#"_ZeroPage") addr8:$r)> {
+      let InOperandList = (ins Ac:$l, addr16:$r);
+    }
+
+    def AbsIdx : MOSBitwiseBase {
+      let InOperandList = (ins Ac:$l, addr16:$addr, XY:$idx);
+    }
+
+    def Indir :
+       MOSBitwiseBase,
+       PseudoInstExpansion<
+           (!cast<Instruction>(NAME#"_Indirect") addr8:$addr)> {
+      let InOperandList = (ins Ac:$l, Imag16:$addr);
+    }
+
+    def IndirIdx :
+       MOSBitwiseBase,
+       PseudoInstExpansion<
+           (!cast<Instruction>(NAME#"_IndirectIndexed") addr8:$addr)> {
+      let InOperandList = (ins Ac:$l, Imag16:$addr, Yc:$idx);
+    }
+  }
+}
+
+defm AND : MOSBitwiseInstr<and>;
+defm EOR : MOSBitwiseInstr<xor>;
+defm ORA : MOSBitwiseInstr<or>;
+
+//===---------------------------------------------------------------------===//
+// Shift/Rotate Instructions
+//===---------------------------------------------------------------------===//
+
+class MOSShiftRotate : MOSLogicalInstr {
+  dag OutOperandList = (outs AImag8:$dst, Cc:$carryout);
+}
+
+class MOSShift : MOSShiftRotate {
+  dag InOperandList = (ins AImag8:$src);
+  let Constraints = "$dst = $src";
+}
+class MOSRotate : MOSShiftRotate {
+  dag InOperandList = (ins AImag8:$src, Cc:$carryin);
+  let Constraints = "$dst = $src, $carryout = $carryin";
+}
+
+class MOSShiftRotateRMW : MOSLogicalInstr {
+  dag OutOperandList = (outs Cc:$carryout);
+  let mayLoad = true;
+  let mayStore = true;
+}
+
+class MOSShiftRMW : MOSShiftRotateRMW {}
+class MOSRotateRMW : MOSShiftRotateRMW {
+  let Constraints = "$carryout = $carryin";
+}
+
+def ASL : MOSShift;
+def LSR : MOSShift;
+
+def ASLAbs : MOSShiftRMW, PseudoInstExpansion<(ASL_ZeroPage addr8:$addr)> {
+  dag InOperandList = (ins addr16:$addr);
+}
+def ASLIdx : MOSShiftRMW {
+  dag InOperandList = (ins addr16:$addr, Xc:$idx);
+}
+def LSRAbs : MOSShiftRMW, PseudoInstExpansion<(LSR_ZeroPage addr8:$addr)> {
+  dag InOperandList = (ins addr16:$addr);
+}
+def LSRIdx : MOSShiftRMW {
+  dag InOperandList = (ins addr16:$addr, Xc:$idx);
+}
+
+def ROL : MOSRotate;
+def ROR : MOSRotate;
+
+def ROLAbs : MOSRotateRMW, PseudoInstExpansion<(ROL_ZeroPage addr8:$addr)> {
+  dag InOperandList = (ins addr16:$addr, Cc:$carryin);
+}
+def ROLIdx : MOSRotateRMW {
+  dag InOperandList = (ins addr16:$addr, Xc:$idx, Cc:$carryin);
+}
+def RORAbs : MOSRotateRMW, PseudoInstExpansion<(ROR_ZeroPage addr8:$addr)> {
+  dag InOperandList = (ins addr16:$addr, Cc:$carryin);
+}
+def RORIdx : MOSRotateRMW {
+  dag InOperandList = (ins addr16:$addr, Xc:$idx, Cc:$carryin);
+}
+
+//===---------------------------------------------------------------------===//
+// BIT Instructions
+//===---------------------------------------------------------------------===//
+// Ever the odd duck.
+//===---------------------------------------------------------------------===//
+
+def BITAbs : MOSLogicalInstr, PseudoInstExpansion<(BIT_ZeroPage addr8:$r)> {
+  dag OutOperandList = (outs Vc:$v);
+  dag InOperandList = (ins Ac:$l, addr16:$r);
+  let mayLoad = true;
+}
+
+def BITImmHUC6280 : MOSLogicalInstr, PseudoInstExpansion<(BIT_Immediate imm8:$r)> {
+  let Predicates = [Has65C02];
+
+  dag OutOperandList = (outs Vc:$v);
+  dag InOperandList = (ins Ac:$l, imm8:$r);
+}
+
+//===---------------------------------------------------------------------===//
+// Control Flow Instructions
+//===---------------------------------------------------------------------===//
+
+class MOSBranch : MOSLogicalInstr {
+  let isBranch = true;
+  let isTerminator = true;
+}
+
+// Covers all branch instructions. Branches to $tgt if $flag = $val.
+def BR : MOSBranch {
+  dag InOperandList = (ins label:$tgt, Flag:$flag, i1imm:$val);
+}
+
+class MOSUnconditionalBranch : MOSBranch {
+  let isBarrier = true;
+}
+
+def BRA : MOSUnconditionalBranch {
+  let Predicates = [HasBRA];
+
+  let InOperandList = (ins label:$tgt);
+  let Pattern = [(br bb:$tgt)];
+}
+
+def JMP : MOSUnconditionalBranch, PseudoInstExpansion<(JMP_Absolute addr16:$tgt)> {
+  let InOperandList = (ins label:$tgt);
+  let Pattern = [(br bb:$tgt)];
+}
+
+def JMPIndir : MOSUnconditionalBranch, PseudoInstExpansion<(JMP_Indirect16 addr16:$tgt)> {
+  let InOperandList = (ins Imag16:$tgt);
+  let isIndirectBranch = true;
+}
+
+def JMLIndir : MOSUnconditionalBranch, PseudoInstExpansion<(JML_Indirect16 addr16:$tgt)> {
+  let Predicates = [HasW65816];
+  let InOperandList = (ins Imag24:$tgt);
+  let isIndirectBranch = true;
+}
+def JMPIdxIndir : MOSUnconditionalBranch, PseudoInstExpansion<(JMP_IndexedIndirect addr16:$tgt)> {
+  let Predicates = [HasJMPIdxIndir];
+  let InOperandList = (ins addr16:$tgt, Xc:$idx);
+  let isIndirectBranch = true;
+}
+
+def JSR : MOSLogicalInstr, PseudoInstExpansion<(JSR_Absolute addr16:$tgt)> {
+  dag InOperandList = (ins label:$tgt);
+
+  let isCall = true;
+}
+
+def TailJMP : MOSLogicalInstr, PseudoInstExpansion<(JMP_Absolute addr16:$tgt)> {
+  dag InOperandList = (ins label:$tgt);
+
+  let isBarrier = true;
+  let isTerminator = true;
+  let isCall = true;
+  let isReturn = true;
+}
+
+class MOSReturn<Instruction Opcode> : MOSLogicalInstr, PseudoInstExpansion<(Opcode)> {
+  let isBarrier = true;
+  let isReturn = true;
+  let isTerminator = true;
+}
+
+def RTS : MOSReturn<RTS_Implied>;
+def RTI : MOSReturn<RTI_Implied>;
+
+//===---------------------------------------------------------------------===//
+// Immediate Load Instructions
+//===---------------------------------------------------------------------===//
+
+class MOSImmediateLoad<RegisterClass dst, Operand val> : MOSLogicalInstr {
+  dag OutOperandList = (outs dst:$dst);
+  dag InOperandList = (ins val:$val);
+
+  let isAsCheapAsAMove = true;
+  let isMoveImm = true;
+}
+
+def CLV : MOSImmediateLoad<Vc, i1imm>, PseudoInstExpansion<(CLV_Implied)> {
+  dag InOperandList = (ins);
+}
+
+// CLC, SEC
+def LDCImm : MOSImmediateLoad<Cc, i1imm>;
+
+// LDA imm, LDX imm, LDY imm
+def LDImm : MOSImmediateLoad<GPR, imm8>;
+
+// CLA, CLX, CLY
+let Predicates = [HasHUC6280] in {
+  def CL : MOSImmediateLoad<GPR, imm8> {
+    dag InOperandList = (ins);
+  }
+}
+
+//===---------------------------------------------------------------------===//
+// Comparison Instructions
+//===---------------------------------------------------------------------===//
+
+class MOSCMP : MOSLogicalInstr {
+  dag OutOperandList = (outs Cc:$carry);
+  let isCompare = true;
+}
+
+def CMPImm : MOSCMP { dag InOperandList = (ins GPR:$l, imm8:$r); }
+def CMPImag8 : MOSCMP { dag InOperandList = (ins GPR:$l, Imag8:$r); }
+
+let mayLoad = true in {
+  def CMPZpIdx : MOSCMP { dag InOperandList = (ins Ac:$l, addr8:$addr, Xc:$idx); }
+  def CMPAbs : MOSCMP { dag InOperandList = (ins GPR:$l, addr16:$addr); }
+  def CMPAbsIdx : MOSCMP { dag InOperandList = (ins Ac:$l, addr16:$addr, XY:$idx); }
+  def CMPIndir : MOSCMP, PseudoInstExpansion<(CMP_Indirect addr8:$addr)> {
+    let Predicates = [Has65C02];
+    dag InOperandList = (ins Ac:$l, Imag16:$addr);
+  }
+  def CMPIndirIdx : MOSCMP, PseudoInstExpansion<(CMP_IndirectIndexed addr8:$addr)> {
+    dag InOperandList = (ins Ac:$l, Imag16:$addr, Yc:$idx);
+  }
+}
+
+//===---------------------------------------------------------------------===//
+// Increment/Decrement Instructions
+//===---------------------------------------------------------------------===//
+
+multiclass MOSIncDec {
+  def NAME : MOSLogicalInstr {
+    dag OutOperandList = (outs Anyi8:$dst);
+    dag InOperandList = (ins Anyi8:$src);
+    let Constraints = "$src = $dst";
+  }
+
+  let mayLoad = true, mayStore = true in {
+    def Abs : MOSLogicalInstr, PseudoInstExpansion<(!cast<Instruction>(NAME # _ZeroPage) addr8:$addr)> {
+      dag InOperandList = (ins addr16:$addr);
+    }
+    def Idx : MOSLogicalInstr {
+      dag InOperandList = (ins addr16:$addr, Xc:$idx);
+    }
+  }
+}
+
+let mayLoad = true, mayStore = true in {
+  def DCPImag8 : MOSLogicalInstr, PseudoInstExpansion<(!cast<Instruction>(DCP_ZeroPage) addr8:$dst)> {
+    dag OutOperandList = (outs Cc:$carry);
+    dag InOperandList = (ins Ac:$value, Imag8:$dst);
+  }
+
+  def DCPAbs : MOSLogicalInstr, PseudoInstExpansion<(!cast<Instruction>(DCP_ZeroPage) addr8:$addr)> {
+    dag OutOperandList = (outs Cc:$carry);
+    dag InOperandList = (ins Ac:$value, addr16:$addr);
+  }
+}
+
+// DEX, DEY, DEC
+defm DEC : MOSIncDec;
+
+// INX, INY, INC
+let isAdd = true in {
+  defm INC : MOSIncDec;
+}
+
+//===---------------------------------------------------------------------===//
+// Register Transfer Instructions
+//===---------------------------------------------------------------------===//
+
+// Instructions that transfer from one register class to another.
+class MOSTransfer<RegisterClass dst, RegisterClass src> : MOSLogicalInstr {
+  dag OutOperandList = (outs dst:$dst);
+  dag InOperandList = (ins src:$src);
+
+  let isAsCheapAsAMove = true;
+}
+
+// LDA zp, LDX zp, LDY zp
+def LDImag8 : MOSTransfer<GPR, Imag8>;
+// STA zp, STX zp, STY zp
+def STImag8 : MOSTransfer<Imag8, GPR>;
+// MOV zp, zp
+def MOVImag8 : MOSTransfer<Imag8, Imag8>,
+    PseudoInstExpansion<(SPC700_MOV_ZeroPageZeroPage addr8:$dst, addr8at2:$src)> {
+  let Predicates = [HasSPC700];
+}
+
+// TAX, TAY
+def TA : MOSTransfer<XY, Ac>;
+// TXA, TYA
+def T_A : MOSTransfer<Ac, XY>;
+
+let Predicates = [HasW65816Or65EL02] in {
+// TXY, TYX
+def TX : MOSTransfer<XY, XY>;
+}
+
+let Predicates = [HasHUC6280] in {
+// SAX, SAY, SXY
+def SWAP : MOSLogicalInstr {
+  dag OutOperandList = (outs GPR:$dst2, GPR:$dst1);
+  dag InOperandList = (ins GPR:$src1, GPR:$src2);
+  let Constraints = "$src1 = $dst1, $src2 = $dst2";
+
+  let isAsCheapAsAMove = true;
+}
+}
+
+//===---------------------------------------------------------------------===//
+// Stack Instructions
+//===---------------------------------------------------------------------===//
+
+// PHA, PLX, PLY, PHP
+def PH : MOSLogicalInstr {
+  dag InOperandList = (ins AXYP:$src);
+
+  let mayStore = true;
+}
+
+// PLA, PLX, PLY, PLP
+def PL : MOSLogicalInstr {
+  dag OutOperandList = (outs AXYP:$dst);
+
+  let mayLoad = true;
+}
+
+//===---------------------------------------------------------------------===//
+// Load/Store Instructions
+//===---------------------------------------------------------------------===//
+
+class MOSLoad : MOSLogicalInstr {
+  let mayLoad = true;
+}
+
+// LDA abs, LDX abs, LDY abs
+def LDAbs : MOSLoad {
+  dag OutOperandList = (outs GPR:$dst);
+  dag InOperandList = (ins addr16:$src);
+}
+
+class MOSLoadIndexed<RegisterClass dst, RegisterClass idx> : MOSLoad {
+  dag OutOperandList = (outs dst:$dst);
+  dag InOperandList = (ins addr16:$addr, idx:$idx);
+}
+// LDA zp,x
+def LDAZpIdx : MOSLoadIndexed<Ac, Xc>;
+// LDA abs,x; LDA abs,y
+def LDAAbsIdx : MOSLoadIndexed<Ac, XY>;
+// LDX abs,y
+def LDXIdx : MOSLoadIndexed<Xc, Yc>;
+// LDY abs,x
+def LDYIdx : MOSLoadIndexed<Yc, Xc>;
+
+// LDA (zp)
+def LDIndir : MOSLoad, PseudoInstExpansion<(LDA_Indirect addr8:$addr)> {
+  let Predicates = [Has65C02];
+  dag OutOperandList = (outs Ac:$dst);
+  dag InOperandList = (ins Imag16:$addr);
+}
+
+// LDA (zp),y
+def LDIndirIdx : MOSLoad, PseudoInstExpansion<(LDA_IndirectIndexed addr8:$addr)> {
+  dag OutOperandList = (outs Ac:$dst);
+  dag InOperandList = (ins Imag16:$addr, Yc:$offset);
+}
+
+class MOSStore : MOSLogicalInstr {
+  let mayStore = true;
+}
+// STA zp,x
+def STZpIdx : MOSStore {
+  dag InOperandList = (ins Ac:$src, addr8:$addr, Xc:$idx);
+}
+// STA abs, STX abs
+def STAbs : MOSStore {
+  dag InOperandList = (ins GPR:$src, addr16:$dst);
+}
+// STA abs,x; STA abs,y
+def STAbsIdx : MOSStore {
+  dag InOperandList = (ins Ac:$src, addr16:$addr, XY:$idx);
+}
+
+// STA (zp)
+def STIndir : MOSStore, PseudoInstExpansion<(STA_Indirect addr8:$addr)> {
+  let Predicates = [Has65C02];
+  dag InOperandList = (ins Ac:$src, Imag16:$addr);
+}
+
+// STA (zp),y
+def STIndirIdx : MOSStore, PseudoInstExpansion<(STA_IndirectIndexed addr8:$addr)> {
+  dag InOperandList = (ins Ac:$src, Imag16:$addr, Yc:$offset);
+}
+
+let Predicates = [Has65C02] in {
+  // STZ abs
+  def STZAbs : MOSStore, PseudoInstExpansion<(STZ_ZeroPage addr8:$addr)> {
+    dag InOperandList = (ins addr16:$addr);
+  }
+  // STZ abs,x
+  def STZIdx : MOSStore {
+    dag InOperandList = (ins addr16:$addr, Xc:$idx);
+  }
+  // STZ zp
+  def STZImag8 : MOSStore, PseudoInstExpansion<(STZ_ZeroPage addr8:$addr)> {
+    dag OutOperandList = (outs Imag8:$addr);
+  }
+}
+
+//===---------------------------------------------------------------------===//
+// HuC Block Copy Instructions
+//===---------------------------------------------------------------------===//
+
+let Predicates = [HasHUC6280] in {
+  // (TII, TDD) abs, abs, imm16
+  def HuCMemcpy : MOSLogicalInstr {
+    dag InOperandList = (ins addr16:$source, addr16:$dest, imm16:$length,
+                         i1imm:$descending);
+
+    let mayLoad = true;
+    let mayStore = true;
+  }
+}
+
+//===---------------------------------------------------------------------===//
+// Addition/Subtraction Patterns
+//===---------------------------------------------------------------------===//
+
+def : Pat<(add Ac:$l, (i8 imm:$imm)), (ADCImm Ac:$l, imm:$imm, (LDCImm 0))>;
+def : Pat<(add Ac:$l, Imag8:$r), (ADCImag8 Ac:$l, Imag8:$r, (LDCImm 0))>;
+def : Pat<(sub Ac:$l, (i8 imm:$imm)), (SBCImm Ac:$l, imm:$imm, (LDCImm -1))>;
+def : Pat<(sub Ac:$l, Imag8:$r), (SBCImag8 Ac:$l, Imag8:$r, (LDCImm -1))>;
+
+// These increment/decrement patterns apply only for the 65C02 and derivatives
+// which support incrementing A directly. The original 6502 uses IncNMOS and
+// DecNMOS pseudos.
+let Predicates = [Has65C02], AddedComplexity = 1 in {
+  def : Pat<(add Anyi8:$dst, 1), (INC Anyi8:$dst)>;
+  def : Pat<(add Anyi8:$dst, -1), (DEC Anyi8:$dst)>;
+}
+
+//===---------------------------------------------------------------------===//
+// Integer Extension/Truncation Patterns
+//===---------------------------------------------------------------------===//
+
+def : Pat<(i16 (anyext Anyi8:$s)), (INSERT_SUBREG (IMPLICIT_DEF), Anyi8:$s, sublo)>;
+
+def : Pat<(i1 (trunc Ac:$s)), (EXTRACT_SUBREG (ANDImm Ac:$s, 1), sublsb)>;
+def : Pat<(i8 (trunc Imag16:$s)), (EXTRACT_SUBREG Imag16:$s, sublo)>;
+
+//===---------------------------------------------------------------------===//
+// Constant Patterns
+//===---------------------------------------------------------------------===//
+
+def : Pat<(i1 imm:$s), (LDImm1 imm:$s)>;
+def : Pat<(i8 imm:$s), (LDImm imm:$s)>;
+//===-- MOSInstrPseudos.td - Describe MOS Pseudo-Instrs ---*- tablegen -*-===//
+//
+// Part of LLVM-MOS, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===---------------------------------------------------------------------===//
+//
+// This file describes the MOS pseudo-instructions.
+//
+// Pseudo-instructions allow deferring generation of specific instruction
+// sequences from one pass until a later pass. This is useful whenever an early
+// pass is required to make a decision that it doesn't have the information
+// necessary to do well.
+//
+//===---------------------------------------------------------------------===//
+
+class MOSPseudo : Instruction {
+  let Namespace = "MOS";
+
+  dag OutOperandList = (outs);
+  dag InOperandList = (ins);
+
+  let hasSideEffects = false;
+  let mayLoad = false;
+  let mayStore = false;
+  let isPseudo = true;
+  let isCodeGenOnly = true;
+}
+
+//===---------------------------------------------------------------------===//
+// Post RA Pseudos
+//===---------------------------------------------------------------------===//
+// These pseudoinstructions defer decisionmaking until after register
+// allocation. They're used whenever the best instruction sequence to emit
+// depends only on the placement of their arguments and the set of live
+// registers before and after the pseudo.
+//===---------------------------------------------------------------------===//
+
+// Abstracts LDAZpIdx and LDYIdx. LDXIdx isn't yet supported, since there's no
+// good way to save and restore $x on a NMOS 6502 when lowering $a = LDZpIdx
+// $y.
+def LDZpIdx : MOSPseudo {
+  dag OutOperandList = (outs AY:$dst);
+  dag InOperandList = (ins i8imm:$addr, Xc:$idx);
+
+  let isReMaterializable = true;
+  let mayLoad = true;
+}
+
+// Abstracts LDAAbsIdx, LDXIdx, and LDYIdx. This is almost a logical instruction,
+// but the "LDX 1234,X" and "LDY 1234,Y" cases aren't natively supported, and
+// more than one instruction is required to emit them.
+def LDAbsIdx : MOSPseudo {
+  dag OutOperandList = (outs GPR:$dst);
+  dag InOperandList = (ins i16imm:$addr, XY:$idx);
+
+  let isReMaterializable = true;
+  let mayLoad = true;
+}
+
+// Loads a boolean value into C, V, ALSB, XLSB, or YLSB.
+def LDImm1 : MOSPseudo {
+  dag OutOperandList = (outs CV_GPR_LSB:$dst);
+  dag InOperandList = (ins i1imm:$val);
+
+  let isAsCheapAsAMove = true;
+  let isMoveImm = true;
+  let isReMaterializable = true;
+}
+
+// Loads a 16-bit value into an imaginary pointer pair. This is generally more
+// constrained than loading two 8-bit values using a REG_SEQUENCE, but bundling
+// this functionality into a single pseudo-instruction allows the register
+// allocator to rematerialize the load at point of use. This is particularly
+// important for immediate loads, since GlobalISel places these at the beginning
+// of basic blocks, which maximizes the chance that they'll be live across
+// calls. Without rematerialization, all these loads would be placed in CSRs,
+// for massive spill/reload overhead.
+def LDImm16 : MOSPseudo {
+  dag OutOperandList = (outs Imag16:$dst, GPR:$scratch);
+  dag InOperandList = (ins i16imm:$val);
+  let Constraints = "@earlyclobber $scratch";
+
+  let isAsCheapAsAMove = true;
+  let isMoveImm = true;
+  let isReMaterializable = true;
+}
+
+// Version of LDImm16 that doesn't use a scratch register, which is possible
+// on the SPC700 architecture.
+def LDImm16SPC700 : MOSPseudo {
+  let Predicates = [HasSPC700];
+  dag OutOperandList = (outs Imag16:$dst);
+  dag InOperandList = (ins i16imm:$val);
+
+  let isAsCheapAsAMove = true;
+  let isMoveImm = true;
+  let isReMaterializable = true;
+}
+
+// Version of LDImm16 that doesn't use a scratch register, to satisfy the
+// requirements for rematerialization. Instead, the register scavenger locates a
+// scratch register at expansion time.
+def LDImm16Remat : MOSPseudo {
+  dag OutOperandList = (outs Imag16:$dst);
+  dag InOperandList = (ins i16imm:$val);
+
+  let isAsCheapAsAMove = true;
+  let isMoveImm = true;
+  let isReMaterializable = true;
+}
+
+// Load zero into GPR.
+def LDZ : MOSPseudo {
+  let Predicates = [Has65C02];
+  dag OutOperandList = (outs Anyi8:$dst);
+  let Pattern = [(set Anyi8:$dst, 0)];
+
+  let isAsCheapAsAMove = true;
+  let isMoveImm = true;
+  let isReMaterializable = true;
+}
+
+def CmpZero : MOSPseudo {
+  dag InOperandList = (ins Anyi8:$val);
+  let Defs = [C];
+  let isCompare = true;
+}
+
+// On 6502, INC/DEC cannot be directly performed on the A register;
+// to do so, one has to use ADC/SBC, which affects the C and V flags.
+def IncNMOS : MOSPseudo {
+  dag OutOperandList = (outs Anyi8:$dst);
+  dag InOperandList = (ins Anyi8:$src);
+
+  let Defs = [C, V];
+
+  let Constraints = "$dst = $src";
+  let Pattern = [(set Anyi8:$dst, (add Anyi8:$src, 1))];
+  let isAdd = true;
+}
+
+def DecNMOS : MOSPseudo {
+  dag OutOperandList = (outs Anyi8:$dst);
+  dag InOperandList = (ins Anyi8:$src);
+
+  let Defs = [C, V];
+
+  let Constraints = "$dst = $src";
+  let Pattern = [(set Anyi8:$dst, (add Anyi8:$src, -1))];
+}
+
+// Pointer increment/decrement.
+class MOSIncDecPtr : MOSPseudo {
+  dag InOperandList = (ins Imag16:$src);
+  let Defs = [C, V];
+  let Constraints = "$dst = $src";
+}
+
+def IncPtr : MOSIncDecPtr {
+  dag OutOperandList = (outs Imag16:$dst);
+  let isAdd = true;
+}
+
+def DecPtr : MOSIncDecPtr {
+  dag OutOperandList = (outs GPR:$scratch, Imag16:$dst);
+  let Constraints = "$dst = $src,@earlyclobber $scratch";
+}
+
+def DecDcpPtr : MOSIncDecPtr {
+  dag OutOperandList = (outs Ac:$scratch, Imag16:$dst);
+  let Constraints = "$dst = $src,@earlyclobber $scratch";
+}
+
+//===---------------------------------------------------------------------===//
+// Soft stack
+//===---------------------------------------------------------------------===//
+
+// The call-frame pseudoinstructions form a signalling mechanism to pass the
+// size of outgoing call frames from calling-convention lowering (in
+// IRTranslator) through to the stack frame prolog-epilog insertion. The latter
+// examines these pseudoinstructions to find the largest size that an outgoing
+// call frame can be, then preallocates that much space to the stack frame if
+// possible. This allows these pseudoinstructions to be summarily removed in
+// most cases, since we can instead guarantee that a reserved region at the
+// bottom of the stack will always have enough free space to set up the
+// arguments of any outgoing call.
+class MOSCallFramePseudo : MOSPseudo {
+  dag InOperandList = (ins i16imm:$bytes, i16imm:$prior);
+
+  let Defs = [RS0];
+  let Uses = [RS0];
+}
+
+// Call frame setup pseudo.
+def ADJCALLSTACKDOWN : MOSCallFramePseudo;
+
+// Call frame destroy pseudo.
+def ADJCALLSTACKUP : MOSCallFramePseudo;
+
+// Produces the low byte of the address of the given frame index. Produces a
+// carry required by the high byte calculation.
+def AddrLostk : MOSPseudo {
+  dag OutOperandList = (outs Anyi8:$dst, Cc:$carry, Vc:$deadv);
+  dag InOperandList = (ins Imag16:$base, i16imm:$offset);
+
+  let isReMaterializable = true;
+}
+
+// Produces the high byte of the address of the given frame index. Accepts the
+// carry produced by the low byte calculation.
+def AddrHistk : MOSPseudo {
+  dag OutOperandList = (outs Anyi8:$dst, Cc:$deadc, Vc:$deadv);
+  dag InOperandList = (ins Imag16:$base, i16imm:$offset, Cc:$carry);
+
+  let isReMaterializable = true;
+}
+
+// LDStk and STStk require an additional pointer register; if the stack access
+// is far, this is used to materialize the necessary pointer. This "wastes" a
+// register in common cases, but it's better to use register allocator
+// mechanisms to keep a pointer register free than to scramble at the last
+// second to scavenge one up.
+
+// Loads a value (1, 8, or 16 bits) from the soft stack. Eliminated once the
+// offset from the frame register is known.
+def LDStk : MOSPseudo {
+  dag OutOperandList = (outs unknown:$dst, Imag16:$scratch);
+  dag InOperandList = (ins Imag16:$base, i16imm:$offset);
+  let Constraints = "@earlyclobber $scratch";
+
+  let mayLoad = true;
+}
+
+// Stores a value (1, 8, or 16 bits) to the soft stack. Eliminated once the
+// offset from the frame register is known.
+def STStk : MOSPseudo {
+  dag OutOperandList = (outs Imag16:$scratch);
+  dag InOperandList = (ins unknown:$src, Imag16:$base, i16imm:$fi);
+  let Constraints = "@earlyclobber $scratch";
+
+  let mayStore = true;
+}
+
+//===---------------------------------------------------------------------===//
+// Control flow
+//===---------------------------------------------------------------------===//
+
+// Generic BR that can branch on Anyi1. Branches to $tgt if $tst = $val.
+def GBR : MOSPseudo {
+  dag InOperandList = (ins label:$tgt, Anyi1:$tst, i1imm:$val);
+
+  // This may need to lower to a CMPTermZ, which clobbers C.
+  let Defs = [C];
+
+  let isBranch = true;
+  let isTerminator = true;
+}
+
+// It's difficult for the code generator to keep N and Z free for the usual
+// multi-byte increments and decrements, so these pseudos bundle arbitrary-width
+// increments and decrements into single instructions. Each use corresponds to
+// one byte in little-endian order. Bytes may either be registers or absolute
+// addresses. For each register, there must be one tied def. Register operands
+// must be constrained to Anyi8.
+class MOSIncDecMB : MOSPseudo {
+  dag InOperandList = (ins variable_ops);
+  let Defs = [C, V];
+
+  let usesCustomInserter = true;
+  let mayLoad = true;
+  let mayStore = true;
+}
+def IncMB : MOSIncDecMB {
+  dag OutOperandList = (outs variable_ops);
+}
+def DecMB : MOSIncDecMB {
+  dag OutOperandList = (outs GPR:$scratch, variable_ops);
+  let Constraints = "@earlyclobber $scratch";
+}
+// DCP-based multi-byte decrement for 6502X. DCP is significantly more compact
+// than DEC + CMP, but only supports the A register as scratch.
+def DecDcpMB : MOSIncDecMB {
+  dag OutOperandList = (outs Ac:$scratch, variable_ops);
+  let Constraints = "@earlyclobber $scratch";
+  let Predicates = [Has6502X];
+}
+
+// Use the diamond control flow pattern to load one of two immediates based on
+// the value of a flag. The output must either be to CV_GPR_LSB or GPR.
+def SelectImm : MOSPseudo {
+  dag OutOperandList = (outs unknown:$dst);
+  dag InOperandList = (ins Flag:$tst, i8imm:$true, i8imm:$false);
+
+  let usesCustomInserter = true;
+}
+
+// Joined compare-and-branch instructions on N and Z. These flags are not
+// explicitly tracked, since they're very difficult to keep alive. Accordingly,
+// they are always bundled with their use, which is always a branch.
+class MOSCmpBr : MOSPseudo {
+  let Defs = [C];
+
+  let isCompare = true;
+  let isBranch = true;
+  let isTerminator = true;
+}
+
+def CmpBrImm : MOSCmpBr {
+  dag InOperandList = (ins label:$tgt, Flag:$flag, i1imm:$flag_val, GPR:$l, i8imm:$r);
+}
+def CmpBrImag8 : MOSCmpBr {
+  dag InOperandList = (ins label:$tgt, Flag:$flag, i1imm:$flag_val, GPR:$l, Imag8:$r);
+}
+def CmpBrZero : MOSCmpBr {
+  dag InOperandList = (ins label:$tgt, Flag:$flag, i1imm:$flag_val, Anyi8:$val);
+}
+
+// (ins label:$tgt, i1imm:$flag_val, Anyi8:$val...)
+// Note that the flag is always Z; N only requires the first byte, so it is
+// legalized to a single CMP.
+def CmpBrZeroMultiByte : MOSCmpBr {
+  dag InOperandList = (ins variable_ops);
+  let usesCustomInserter = true;
+}
+
+let mayLoad = true in {
+  def CmpBrZpIdx : MOSCmpBr {
+    dag InOperandList = (ins label:$tgt, Flag:$flag, i1imm:$flag_val, Ac:$l, i8imm:$addr, Xc:$idx);
+  }
+  def CmpBrAbs : MOSCmpBr {
+    dag InOperandList = (ins label:$tgt, Flag:$flag, i1imm:$flag_val, GPR:$l, i16imm:$addr);
+  }
+  def CmpBrAbsIdx : MOSCmpBr {
+    dag InOperandList = (ins label:$tgt, Flag:$flag, i1imm:$flag_val, Ac:$l, i16imm:$addr, XY:$idx);
+  }
+  def CmpBrIndir : MOSCmpBr {
+    let Predicates = [Has65C02];
+    dag InOperandList = (ins label:$tgt, Flag:$flag, i1imm:$flag_val, Ac:$l, Imag16:$addr);
+  }
+  def CmpBrIndirIdx : MOSCmpBr {
+    dag InOperandList = (ins label:$tgt, Flag:$flag, i1imm:$flag_val, Ac:$l, Imag16:$addr, Yc:$idx);
+  }
+}
+//===- MOSRegisterBanks.td - MOS Register Bank Description -*- tablegen -*-===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// This file describes the GlobalISel Register Banks for MOS.
+//
+//===----------------------------------------------------------------------===//
+
+// Register banks are unused, so place everything in one big bank.
+def AnyRegBank : RegisterBank<"Any", [Anyi1, Anyi8, Imag16, Imag24, Fakei32, Fakei64]>;
+//===-- MOSRegisterInfo.td - MOS Register defs -------------*- tablegen -*-===//
+//
+// Part of LLVM-MOS, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+//===----------------------------------------------------------------------===//
+//  Subregister indices
+//===----------------------------------------------------------------------===//
+
+class MOSSubRegIndex<int size, int offset = 0>: SubRegIndex<size, offset> {
+  let Namespace = "MOS";
+}
+
+// Low byte of a 16-bit imaginary pointer register.
+def sublo : MOSSubRegIndex<8>;
+
+// High byte of a 16-bit imaginary pointer register.
+def subhi : MOSSubRegIndex<8, 8>;
+
+// Carry bit of the 8-bit processor status register.
+def subcarry : MOSSubRegIndex<1>;
+
+// Two NZ bits of the 8-bit processor status register.
+def subnz : MOSSubRegIndex<2>;
+
+// N bit of the 2-bit NZ register.
+def subn : MOSSubRegIndex<1>;
+
+// Z bit of the 2-bit NZ register.
+def subz : MOSSubRegIndex<1>;
+
+// V bit of the 8-bit processor status register.
+def subv : MOSSubRegIndex<1>;
+
+// Least-significant bit of an 8-bit register. Writes to this are considered to
+// write zeroes to the other bits (for now), so we can reduce LSB writes to
+// zero-extension.
+def sublsb : MOSSubRegIndex<1>;
+
+//===----------------------------------------------------------------------===//
+//  Real registers
+//===----------------------------------------------------------------------===//
+
+// All MOS registers have the prefix llvm_mos_ added to them, to avoid conflicts
+// with legacy assembly code that depends on the register names as variables.
+// (The MOS instructions generally don't name the target register as a
+// parameter. The target registers are implied by the opcode.)
+class MOSReg<bits<16> num, string name>
+  : Register<!strconcat("llvm_mos_", name)>, DwarfRegNum<[num]> {
+  field bits<16> Num = num;
+  let HWEncoding = num;
+  let Namespace = "MOS";
+  let AltNames = [name];
+}
+
+// An 8-bit value register (GPR or imaginary). Contains a 1-bit LSB subregister
+// to allow them to store boolean values.
+multiclass MOSReg8<bits<16> num, string name> {
+  def LSB : MOSReg<!add(num, 1), name#"LSB">;
+
+  def NAME : MOSReg<num, name> {
+    let SubRegs = [!cast<Register>(NAME#LSB)];
+    let SubRegIndices = [sublsb];
+  }
+}
+
+defm A : MOSReg8<0, "a">;
+defm X : MOSReg8<2, "x">;
+defm Y : MOSReg8<4, "y">;
+def S : MOSReg<6, "s">;
+
+def C : MOSReg<7, "C">;
+def N : MOSReg<8, "N">;
+def V : MOSReg<9, "V">;
+def Z : MOSReg<10, "Z">;
+
+// N and Z are always set together, so model them as one register with two
+// one-bit subregisters.
+def NZ : MOSReg<11, "NZ"> {
+  let SubRegs = [N, Z];
+  let SubRegIndices = [subn, subz];
+  let CoveredBySubRegs = true;
+}
+
+def P : MOSReg<12, "P"> {
+  let SubRegs = [C, NZ, V];
+  let SubRegIndices = [subcarry, subnz, subv];
+}
+
+//===----------------------------------------------------------------------===//
+//  Imaginary registers
+//===----------------------------------------------------------------------===//
+
+// This section describes the dimension of the imaginary registers for the MOS
+// targets. Imaginary registers are locations in the zero page that llvm can
+// treat as physical registers for the purpose of register allocation.
+
+// Imaginary registers are reserved in pairs, which allows them to be used as
+// pointers with the 6502's indirect addressing modes. The number of imaginary
+// register pointer pairs is configurable at code generation time via the
+// --num-imag-ptrs flag. See MOSRegisterInfo.cpp for details.
+
+// The two bytes of any given pointer must be contiguous, but otherwise, there
+// are no constraints on the relative layout of the pointers. For example, RS0
+// could be allocated to 0x34 and 0x35, while RS1 is allocated to 0x12 and 0x34.
+// The code generator emits generic symbol references for imaginary registers,
+// and the linker script for a given memory layout later assigns these to their
+// real locations.
+
+// The first 16-bit imaginary register is reserved as the soft stack pointer.
+// The second 16-bit imaginary register is reserved as a frame pointer whenever
+// necessary, on a function-by-function basis.
+
+// 8-bit imaginary registers.
+multiclass MOSImagReg8<bits<16> num, string name> : MOSReg8<num, name>;
+
+// 16-bit imaginary registers (consecutive pairs of 8-bit registers).
+class MOSImagReg16<bits<16> num, string name, list<Register> subregs>
+    : MOSReg<num, name> {
+  let SubRegs = subregs;
+  let SubRegIndices = [sublo, subhi];
+  let CoveredBySubRegs = 1;
+}
+
+defvar MaxImag8Regs = 256;
+// The starting DWARF number for the imaginary registers.
+defvar Imag8RegsOffset = 0x10;
+
+defvar MaxImag16Regs = !sra(MaxImag8Regs, 1);
+defvar Imag16RegsOffset = !add(Imag8RegsOffset, !shl(MaxImag8Regs,1));
+
+// Now we enumerate the imaginary registers.
+// Imaginary 8-bit registers, starting with the prefix rc
+foreach I = 0...!add(MaxImag8Regs, -1) in {
+  // There exist MaxImag8Regs rcXX registers...
+  defm RC#I: MOSImagReg8<!add(!shl(I,1), Imag8RegsOffset), "rc"#!cast<string>(I)>;
+}
+
+// Imaginary 16-bit registers, starting with the prefix rs
+foreach I = 0...!add(MaxImag16Regs, -1) in {
+  // There exist MaxImag16Regs rsXX registers...
+  def RS#I: MOSImagReg16<!add(I, Imag16RegsOffset), "rs"#!cast<string>(I),
+      [!cast<Register>("RC"#!shl(I, 1)),
+       !cast<Register>("RC"#!add(!shl(I,1),1))]>;
+}
+
+//===----------------------------------------------------------------------===//
+//  Register classes
+//===----------------------------------------------------------------------===//
+
+class MOSRegClass<list<ValueType> regTypes, int alignment, dag regList>
+     : RegisterClass<"MOS", regTypes, alignment, regList>;
+
+class MOSReg1Class<dag RegList>: MOSRegClass<[i1], 8, RegList> {
+  // The register is 1-bit wide, but takes 8 bits to spill.
+  let RegInfos = RegInfoByHwMode<[DefaultMode], [RegInfo<1, 8, 8>]>;
+}
+class MOSReg8Class<dag RegList>: MOSRegClass<[i8], 8, RegList>;
+class MOSReg16Class<dag RegList>: MOSRegClass<[i16], 8, RegList>;
+
+// Single register classes.
+let isPressureFineGrained = true in {
+  def Ac : MOSReg8Class<(add A)>;
+  def Xc : MOSReg8Class<(add X)>;
+  def Yc : MOSReg8Class<(add Y)>;
+  def Cc : MOSReg1Class<(add C)>;
+  def Vc : MOSReg1Class<(add V)>;
+  def Pc : MOSReg8Class<(add P)>;
+}
+
+// "General purpose" register classes.
+let isPressureFineGrained = true in {
+  def GPR : MOSReg8Class<(add X, Y, A)>;
+  def GPR_LSB : MOSReg1Class<(add XLSB, YLSB, ALSB)>;
+  def CV_GPR_LSB : MOSReg1Class<(add Cc, GPR_LSB, Vc)>;
+}
+def Imag8 : MOSReg8Class<(sequence "RC%u", 0, !add(MaxImag8Regs, -1))>;
+def Imag16 : MOSReg16Class<(sequence "RS%u", 0, !add(MaxImag16Regs, -1))>;
+
+// Instruction-specific register classes.
+def AImag8 : MOSReg8Class<(add Imag8, A)>;
+let isPressureFineGrained = true in {
+  def AY : MOSReg8Class<(add A, Y)>;
+  def XY : MOSReg8Class<(add X, Y)>;
+}
+let isAllocatable = false in {
+  def Flag : MOSReg1Class<(add C, N, V, Z)>;
+  def AP : MOSReg8Class<(add A, P)>;
+  def AXYP : MOSReg8Class<(add A, X, Y, P)>;
+}
+
+// While not directly used, unless this is present, the TableGen-erated intersection
+// register class between Anyi1 and Flags will not be allocatable.
+def AllocatableFlags : MOSReg1Class<(add Cc, Vc)>;
+
+// MOS assembly mnemonics may only have the following registers as parameters
+// following the comma in a mnemonic, e.g. lda hello, x
+def MOSAsmParamRegClass : MOSReg8Class<(add X, Y, S)>;
+
+// Sum types of all available storage locations for a size.
+
+def Anyi1 : MOSReg1Class<(add (sequence "RC%uLSB", 0, !add(MaxImag8Regs, -1)), CV_GPR_LSB)>;
+def Anyi8 : MOSReg8Class<(add Imag8, GPR)>;
+
+def Fake : MOSReg<13, "Fake">;
+let isAllocatable = false in {
+  def Fakei32 : MOSRegClass<[i32], 8, (add Fake)>;
+  def Fakei64 : MOSRegClass<[i64], 8, (add Fake)>;
+}
+def sublo16 : MOSSubRegIndex<16, 0> {
+  let ComposedOf = [sublo, subhi];
+}
+
+// NEW: Upper 8 bits (bits 16-23)
+def subupper : MOSSubRegIndex<8, 16>;
+// NEW: Top 8 bits (bits 24-31)
+def subtop : MOSSubRegIndex<8, 24>;
+
+// Define 32-bit registers (used for 24-bit pointers + padding)
+// We use 4 subregisters to fully cover the 32-bit value.
+class MOSImagReg32<bits<16> num, string name, list<Register> subregs>
+    : MOSReg<num, name> {
+  let SubRegs = subregs;
+  let SubRegIndices = [sublo, subhi, subupper, subtop]; 
+  let CoveredBySubRegs = 1;
+}
+
+class MOSReg32Class<dag RegList>: MOSRegClass<[i32], 8, RegList> {
+  // 32-bit size, 32-bit spill, 8-bit align
+  let RegInfos = RegInfoByHwMode<[DefaultMode], [RegInfo<32, 32, 8>]>;
+}
+
+// 256 / 4 = 64 registers available
+defvar MaxImag32Regs = 64; 
+defvar Imag32RegsOffset = !add(Imag16RegsOffset, !shl(MaxImag16Regs, 1));
+
+foreach I = 0...!add(MaxImag32Regs, -1) in {
+  def RL#I: MOSImagReg32<!add(I, Imag32RegsOffset), "rl"#!cast<string>(I),
+      [!cast<Register>("RC"#!mul(I, 4)),
+       !cast<Register>("RC"#!add(!mul(I, 4), 1)),
+       !cast<Register>("RC"#!add(!mul(I, 4), 2)),
+       !cast<Register>("RC"#!add(!mul(I, 4), 3))]>;
+}
+
+// Map this class to Imag24 name to allow existing C++ code to find it
+def Imag24 : MOSReg32Class<(sequence "RL%u", 0, !add(MaxImag32Regs, -1))>;

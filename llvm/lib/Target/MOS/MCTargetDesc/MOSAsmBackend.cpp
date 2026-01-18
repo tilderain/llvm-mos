@@ -268,8 +268,8 @@ unsigned MOSAsmBackend::relaxInstructionTo(unsigned Opcode,
   const auto *BIRE = MOS::getBranchInstructionRelaxationEntry(Opcode);
   if (BIRE) {
     if (STI.hasFeature(MOS::FeatureW65816)) {
-      if (BIRE->To == MOS::BRA_Relative16)
-        return MOS::BRL_Relative16;
+      //if (BIRE->To == MOS::BRA_Relative16)
+      //  return MOS::BRL_Relative16;
       return 0;
     }
 

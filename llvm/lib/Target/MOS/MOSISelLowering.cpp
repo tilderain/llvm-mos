@@ -34,6 +34,8 @@
 #include "MOSSubtarget.h"
 #include "MOSTargetMachine.h"
 
+#include "llvm/Support/raw_ostream.h"
+
 using namespace llvm;
 
 MOSTargetLowering::MOSTargetLowering(const MOSTargetMachine &TM,
@@ -560,9 +562,9 @@ static MachineBasicBlock *emitIncDecMB(MachineInstr &MI,
 
 static MachineBasicBlock *emitCmpBrZeroMultiByte(MachineInstr &MI,
                                                  MachineBasicBlock *MBB) {
-  if (!MBB->getParent()->getProperties().hasProperty(
-          MachineFunctionProperties::Property::NoVRegs))
-    return MBB;
+  //if (!MBB->getParent()->getProperties().hasProperty(
+  //        MachineFunctionProperties::Property::NoVRegs))
+  //  return MBB;
   const MOSSubtarget &STI = MBB->getParent()->getSubtarget<MOSSubtarget>();
   const TargetInstrInfo &TII = *STI.getInstrInfo();
 
@@ -679,6 +681,8 @@ static MachineBasicBlock *emitCmpBrZeroMultiByte(MachineInstr &MI,
   // Update live regs.
   recomputeLiveIns(*MaybeZero);
   recomputeLiveIns(*MBB);
+
+  MI.eraseFromParent(); 
 
   return MaybeZero;
 }

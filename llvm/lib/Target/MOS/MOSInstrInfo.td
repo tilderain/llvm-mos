@@ -145,6 +145,7 @@ def JMP_Indirect16 :
 	InstUnconditionalBranch {
   let isIndirectBranch = true;
 }
+
 def STY_ZeroPage :
 	Inst16<"sty", OpcodeC0<0b100, 0b001>, ZeroPage>;
 def STY_Absolute :
@@ -731,8 +732,8 @@ let DecoderNamespace = "w65816" in {
 /// BRL
 /// 82
 
-def BRL_Relative16 : Inst24<"brl", OpcodeC2<0b100, 0b000>, Relative16>,
-    InstUnconditionalBranch;
+//def BRL_Relative16 : Inst24<"brl", OpcodeC2<0b100, 0b000>, Relative16>,
+//    InstUnconditionalBranch;
 
 /// 24-bit long-jumps
 /// JMP JSL

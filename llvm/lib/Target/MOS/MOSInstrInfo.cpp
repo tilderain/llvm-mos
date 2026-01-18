@@ -326,7 +326,11 @@ bool MOSInstrInfo::isBranchOffsetInRange(unsigned BranchOpc,
     // BR range is [-128,127] starting from the PC location after the
     // instruction, which is two bytes after the start of the instruction.
     return -126 <= BrOffset && BrOffset <= 129;
+  //case MOS::BRL_Relative16:
+    // BRL range is [-32768, 32767]
+  //  return -32765 <= BrOffset && BrOffset <= 32770; // Approximate safety
   case MOS::JMP:
+  case MOS::JMP_AbsoluteLong:
     return true;
   }
 }
@@ -340,6 +344,8 @@ MOSInstrInfo::getBranchDestBlock(const MachineInstr &MI) const {
   case MOS::BR:
   case MOS::BRA:
   case MOS::JMP:
+ // case MOS::BRL_Relative16: // Add this
+  case MOS::JMP_AbsoluteLong: // Add this
   case MOS::CmpBrImm:
   case MOS::CmpBrImag8:
   case MOS::CmpBrZero:
@@ -451,52 +457,41 @@ unsigned MOSInstrInfo::insertBranch(MachineBasicBlock &MBB,
                                     ArrayRef<MachineOperand> Cond,
                                     const DebugLoc &DL, int *BytesAdded) const {
   MachineFunction &MF = *MBB.getParent();
-
   MachineIRBuilder Builder(MBB, MBB.end());
   unsigned NumAdded = 0;
-  if (BytesAdded)
-    *BytesAdded = 0;
+  if (BytesAdded) *BytesAdded = 0;
 
-  // Unconditional branch target.
-  auto *UBB = TBB;
-
-  // Conditional branch.
+  // 1. Conditional Branch
   if (!Cond.empty()) {
-    assert(TBB);
-
-    // The unconditional branch will be to the false branch (if any).
-    UBB = FBB;
-
-    // Add conditional branch.
-    auto BR = Builder.buildInstr(Cond.front().getImm()).addMBB(TBB);
+    auto BR = Builder.buildInstr(Cond.front().getImm());
+    BR.addMBB(TBB); 
     for (const MachineOperand &Op : Cond.drop_front())
       BR.add(Op);
-
-    // Add a fictitious MMO if necessary.
+      
     if (BR->mayLoad())
       BR->addMemOperand(MF, MF.getMachineMemOperand(MachinePointerInfo{},
                                                     MachineMemOperand::MOLoad,
                                                     LLT::scalar(8), Align{}));
-
     ++NumAdded;
-    if (BytesAdded)
-      *BytesAdded += getInstSizeInBytes(*BR);
+    if (BytesAdded) *BytesAdded += getInstSizeInBytes(*BR);
+    
+    if (!FBB) return NumAdded;
   }
 
-  // Add unconditional branch if necessary.
-  if (UBB) {
-    // For 65C02/65DTV02, assume BRA and relax into JMP in
-    // insertIndirectBranch if necessary.
-    auto JMP =
-        Builder.buildInstr(STI->hasBRA() ? MOS::BRA : MOS::JMP).addMBB(UBB);
+  // 2. Unconditional Branch
+  MachineBasicBlock *UncondTarget = Cond.empty() ? TBB : FBB;
+  if (UncondTarget) {
+    unsigned Opcode = MOS::JMP;
+    if (STI->hasW65816()) Opcode = MOS::JMP_AbsoluteLong;
+    else if (STI->hasBRA()) Opcode = MOS::BRA;
+
+    auto JMP = Builder.buildInstr(Opcode).addMBB(UncondTarget);
     ++NumAdded;
-    if (BytesAdded)
-      *BytesAdded += getInstSizeInBytes(*JMP);
+    if (BytesAdded) *BytesAdded += getInstSizeInBytes(*JMP);
   }
 
   return NumAdded;
 }
-
 void MOSInstrInfo::insertIndirectBranch(MachineBasicBlock &MBB,
                                         MachineBasicBlock &NewDestBB,
                                         MachineBasicBlock &RestoreBB,
@@ -1276,6 +1271,9 @@ void MOSInstrInfo::expandGBR(MachineIRBuilder &Builder) const {
   switch (Tst) {
   case MOS::C:
   case MOS::V:
+  // ADD THESE TWO LINES:
+  case MOS::N:
+  case MOS::Z:
     return;
   default: {
     Register TstReg =

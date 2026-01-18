@@ -210,3 +210,40 @@ let isAllocatable = false in {
   def Fakei32 : MOSRegClass<[i32], 8, (add Fake)>;
   def Fakei64 : MOSRegClass<[i64], 8, (add Fake)>;
 }
+def sublo16 : MOSSubRegIndex<16, 0> {
+  let ComposedOf = [sublo, subhi];
+}
+
+// NEW: Upper 8 bits (bits 16-23)
+def subupper : MOSSubRegIndex<8, 16>;
+// NEW: Top 8 bits (bits 24-31)
+def subtop : MOSSubRegIndex<8, 24>;
+
+// Define 32-bit registers (used for 24-bit pointers + padding)
+// We use 4 subregisters to fully cover the 32-bit value.
+class MOSImagReg32<bits<16> num, string name, list<Register> subregs>
+    : MOSReg<num, name> {
+  let SubRegs = subregs;
+  let SubRegIndices = [sublo, subhi, subupper, subtop]; 
+  let CoveredBySubRegs = 1;
+}
+
+class MOSReg32Class<dag RegList>: MOSRegClass<[i32], 8, RegList> {
+  // 32-bit size, 32-bit spill, 8-bit align
+  let RegInfos = RegInfoByHwMode<[DefaultMode], [RegInfo<32, 32, 8>]>;
+}
+
+// 256 / 4 = 64 registers available
+defvar MaxImag32Regs = 64; 
+defvar Imag32RegsOffset = !add(Imag16RegsOffset, !shl(MaxImag16Regs, 1));
+
+foreach I = 0...!add(MaxImag32Regs, -1) in {
+  def RL#I: MOSImagReg32<!add(I, Imag32RegsOffset), "rl"#!cast<string>(I),
+      [!cast<Register>("RC"#!mul(I, 4)),
+       !cast<Register>("RC"#!add(!mul(I, 4), 1)),
+       !cast<Register>("RC"#!add(!mul(I, 4), 2)),
+       !cast<Register>("RC"#!add(!mul(I, 4), 3))]>;
+}
+
+// Map this class to Imag24 name to allow existing C++ code to find it
+def Imag24 : MOSReg32Class<(sequence "RL%u", 0, !add(MaxImag32Regs, -1))>;

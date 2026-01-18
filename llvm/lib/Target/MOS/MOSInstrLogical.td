@@ -311,6 +311,11 @@ def JMPIndir : MOSUnconditionalBranch, PseudoInstExpansion<(JMP_Indirect16 addr1
   let isIndirectBranch = true;
 }
 
+def JMLIndir : MOSUnconditionalBranch, PseudoInstExpansion<(JML_Indirect16 addr16:$tgt)> {
+  let Predicates = [HasW65816];
+  let InOperandList = (ins Imag24:$tgt);
+  let isIndirectBranch = true;
+}
 def JMPIdxIndir : MOSUnconditionalBranch, PseudoInstExpansion<(JMP_IndexedIndirect addr16:$tgt)> {
   let Predicates = [HasJMPIdxIndir];
   let InOperandList = (ins addr16:$tgt, Xc:$idx);

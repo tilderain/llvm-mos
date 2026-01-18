@@ -49,11 +49,13 @@ MOSRegisterInfo::MOSRegisterInfo()
                          /*PC=*/0, /*HwMode=*/0),
       Imag8SymbolNames(new std::string[getNumRegs()]), Reserved(getNumRegs()) {
   for (unsigned Reg : seq(0u, getNumRegs())) {
-    // Pointers are referred to by their low byte in the addressing modes that
-    // use them.
     unsigned R = Reg;
     if (MOS::Imag16RegClass.contains(R))
       R = getSubReg(R, MOS::sublo);
+    // CRITICAL: Handle Imag24/Imag32 (whatever you named the class in RegisterInfo.td)
+    else if (MOS::Imag24RegClass.contains(R)) // Check this name matches your TD!
+      R = getSubReg(R, MOS::sublo);
+      
     if (!MOS::Imag8RegClass.contains(R))
       continue;
     std::string &Str = Imag8SymbolNames[Reg];
@@ -63,9 +65,12 @@ MOSRegisterInfo::MOSRegisterInfo()
   }
 
   // Reserve all imaginary registers beyond the number allowed to the compiler.
-  for (Register Ptr : enum_seq_inclusive(MOS::RS16, MOS::RS127))
+ for (Register Ptr : enum_seq_inclusive(MOS::RS16, MOS::RS127))
     reserveAllSubregs(&Reserved, Ptr);
-
+  
+  // Update for 4-byte registers (RL16 to RL63)
+  for (Register Ptr : enum_seq_inclusive(MOS::RL16, MOS::RL63))
+    reserveAllSubregs(&Reserved, Ptr);
   // Reserve stack pointers.
   reserveAllSubregs(&Reserved, MOS::RS0);
 
@@ -100,6 +105,10 @@ MOSRegisterInfo::getLargestLegalSuperClass(const TargetRegisterClass *RC,
     return &MOS::Anyi1RegClass;
   if (RC->hasSuperClass(&MOS::Anyi8RegClass))
     return &MOS::Anyi8RegClass;
+  // Add this:
+  if (RC->hasSuperClass(&MOS::Imag24RegClass))
+    return &MOS::Imag24RegClass;
+  
   return RC;
 }
 
@@ -959,6 +968,9 @@ MOSInstrCost MOSRegisterInfo::copyCost(Register DestReg, Register SrcReg,
   }
   if (AreClasses(MOS::Imag16RegClass, MOS::Imag16RegClass)) {
     return copyCost(MOS::RC0, MOS::RC1, STI) * 2;
+  }
+  if (AreClasses(MOS::Imag24RegClass, MOS::Imag24RegClass)) {
+    return copyCost(MOS::RC0, MOS::RC1, STI) * 3;
   }
   if (AreClasses(MOS::Anyi1RegClass, MOS::Anyi1RegClass)) {
     Register SrcReg8 =

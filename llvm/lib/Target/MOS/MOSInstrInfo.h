@@ -122,6 +122,8 @@ public:
 
   unsigned findCustomTiedOperandIdx(const MachineInstr &MI,
                                     unsigned OpIdx) const override;
+                                    
+  bool expandCmpBrZeroMultiByte(MachineInstr &MI) const;                                    
 
 private:
   const MOSSubtarget *STI;
