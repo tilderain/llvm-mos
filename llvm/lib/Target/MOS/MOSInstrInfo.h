@@ -122,7 +122,7 @@ public:
 
   unsigned findCustomTiedOperandIdx(const MachineInstr &MI,
                                     unsigned OpIdx) const override;
-                                    
+
   bool expandCmpBrZeroMultiByte(MachineInstr &MI) const;                                    
 
 private:
@@ -140,6 +140,7 @@ private:
   void expandLDImm1(MachineIRBuilder &Builder) const;
   void expandLDImm16(MachineIRBuilder &Builder) const;
   void expandLDImm16Remat(MachineIRBuilder &Builder) const;
+  void expandLDImm32(MachineIRBuilder &Builder) const; // Added
   void expandLDZ(MachineIRBuilder &Builder) const;
   void expandIncDecNMOS(MachineIRBuilder &Builder) const;
   void expandIncDecPtr(MachineIRBuilder &Builder) const;

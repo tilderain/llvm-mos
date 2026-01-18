@@ -728,7 +728,7 @@ void MOSMCInstLower::lower(const MachineInstr *MI, MCInst &OutMI) {
       return;
     }
   }
-case MOS::JML_Indirect16: {
+  case MOS::JML_Indirect16: {
     // This instruction corresponds to "JML [addr]".
     // If the operand is a register (Imag24/32), it means we are jumping indirect via that ZP register.
     // We must emit the SYMBOL of the register (e.g. __rc2) as the operand, not the register index.

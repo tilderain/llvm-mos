@@ -124,6 +124,19 @@ def G_STORE_ABS_IDX : MOSGenericInstruction {
   let mayStore = true;
 }
 
+
+def G_LOAD_ABS_LONG : MOSGenericInstruction {
+  let OutOperandList = (outs type0:$dst);
+  let InOperandList = (ins unknown:$addr);
+  let mayLoad = true;
+}
+
+def G_STORE_ABS_LONG : MOSGenericInstruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins type0:$src, unknown:$addr);
+  let mayStore = true;
+}
+
 // Generalized 8-bit store using the indirect addressing mode. Additionally
 // expects a MachineMemOperand.
 def G_STORE_INDIR : MOSGenericInstruction {

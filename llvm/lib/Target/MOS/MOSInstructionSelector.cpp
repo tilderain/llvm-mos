@@ -1358,8 +1358,20 @@ bool MOSInstructionSelector::selectAddr(MachineInstr &MI) {
   if (Op.isCImm())
     Op.ChangeToImmediate(Op.getCImm()->getSExtValue());
 
-  MachineInstrBuilder Instr = buildLdImm(Builder, MI.getOperand(0))
-                                  .add(Op);
+  Register Dst = MI.getOperand(0).getReg();
+  LLT Ty = Builder.getMRI()->getType(Dst);
+
+  // Handle 32-bit address/constant loads (for 24-bit pointers)
+  if (Ty.getSizeInBits() == 32) {
+    Register Scratch = Builder.getMRI()->createVirtualRegister(&MOS::GPRRegClass);
+    auto Instr = Builder.buildInstr(MOS::LDImm32, {Dst, Scratch}, {}).add(Op);
+    if (!constrainSelectedInstRegOperands(*Instr, TII, TRI, RBI))
+      return false;
+    MI.eraseFromParent();
+    return true;
+  }
+
+  MachineInstrBuilder Instr = buildLdImm(Builder, Dst).add(Op);
   if (!constrainSelectedInstRegOperands(*Instr, TII, TRI, RBI))
     return false;
   MI.eraseFromParent();
@@ -2035,14 +2047,12 @@ bool MOSInstructionSelector::selectUnMergeValues(MachineInstr &MI) {
     TopCopy->getOperand(1).setSubReg(MOS::subtop);
     constrainGenericOp(*TopCopy);
 
-    auto HiMerge = Builder.buildMergeValues(Hi16, {Up8, Top8});
-    constrainGenericOp(*HiMerge);
-    
-    // START FIX
-    // Recursively select the newly created merge instruction so it is
-    // converted to a REG_SEQUENCE and doesn't remain as a generic opcode.
-    if (!select(*HiMerge)) return false;
-    // END FIX
+    // FIX: Build REG_SEQUENCE directly to avoid recursive select and def issues
+    auto RegSeq = Builder.buildInstr(MOS::REG_SEQUENCE)
+                      .addDef(Hi16)
+                      .addUse(Up8).addImm(MOS::sublo)
+                      .addUse(Top8).addImm(MOS::subhi);
+    constrainGenericOp(*RegSeq);
 
     MI.eraseFromParent();
     return true;

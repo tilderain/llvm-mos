@@ -343,3 +343,14 @@ let mayLoad = true in {
     dag InOperandList = (ins label:$tgt, Flag:$flag, i1imm:$flag_val, Ac:$l, Imag16:$addr, Yc:$idx);
   }
 }
+
+// Loads a 32-bit value (used for 24-bit pointers) into an imaginary register.
+def LDImm32 : MOSPseudo {
+  dag OutOperandList = (outs Imag24:$dst, GPR:$scratch);
+  dag InOperandList = (ins i32imm:$val);
+  let Constraints = "@earlyclobber $scratch";
+
+  let isAsCheapAsAMove = true;
+  let isMoveImm = true;
+  let isReMaterializable = true;
+}

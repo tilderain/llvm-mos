@@ -52,6 +52,13 @@ MOSTargetInfo::MOSTargetInfo(const llvm::Triple &Triple, const TargetOptions &)
   Char32Type = UnsignedLong;
   Int16Type = SignedInt;
   SigAtomicType = UnsignedChar;
+
+
+  PointerWidth = 32;
+  PointerAlign = 8;
+  SizeType = UnsignedLong;    // 32-bit
+  PtrDiffType = SignedLong;   // 32-bit
+  IntPtrType = SignedLong;    // 32-bit
 }
 
 bool MOSTargetInfo::validateAsmConstraint(

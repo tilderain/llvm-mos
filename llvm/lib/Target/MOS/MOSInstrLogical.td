@@ -631,3 +631,13 @@ def : Pat<(i8 (trunc Imag16:$s)), (EXTRACT_SUBREG Imag16:$s, sublo)>;
 
 def : Pat<(i1 imm:$s), (LDImm1 imm:$s)>;
 def : Pat<(i8 imm:$s), (LDImm imm:$s)>;
+
+
+def LDAbsLong : MOSLoad {
+  dag OutOperandList = (outs Ac:$dst);
+  dag InOperandList = (ins addr24:$src);
+}
+
+def STAbsLong : MOSStore {
+  dag InOperandList = (ins Ac:$src, addr24:$dst);
+}
