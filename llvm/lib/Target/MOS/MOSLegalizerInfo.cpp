@@ -87,18 +87,23 @@ MOSLegalizerInfo::MOSLegalizerInfo(const MOSSubtarget &STI) {
       .maxScalar(0, S8)
       .unsupported();
 
-  getActionDefinitionsBuilder({G_GLOBAL_VALUE, G_FRAME_INDEX, G_BLOCK_ADDR})
-      .legalFor({P, PZ})
+
+getActionDefinitionsBuilder({G_GLOBAL_VALUE, G_FRAME_INDEX, G_BLOCK_ADDR})
+      .legalFor({P, PZ, LLT::pointer(0, 32), LLT::pointer(0, 16)})
       .unsupported();
+
 
   // Integer Extension and Truncation
 
-  getActionDefinitionsBuilder(G_ANYEXT)
+
+getActionDefinitionsBuilder(G_ANYEXT)
       .legalFor({{S16, S8}})
+      .customFor({{S32, S16}, {S32, S8}}) // Add support for 32-bit extensions
       .customIf(typeIs(1, S1))
       .unsupported();
-  getActionDefinitionsBuilder(G_TRUNC)
+getActionDefinitionsBuilder(G_TRUNC)
       .legalFor({{S1, S8}, {S1, S16}, {S8, S16}})
+      .customFor({{S16, P}, {S16, S32}, {S8, S32}, {P, S16}, {P, S32}}) // Added {S8, S32}
       .unsupported();
 
   getActionDefinitionsBuilder(G_SEXT).custom();
@@ -107,8 +112,10 @@ MOSLegalizerInfo::MOSLegalizerInfo(const MOSSubtarget &STI) {
 
   getActionDefinitionsBuilder(G_ZEXT)
       .customIf(typeIs(1, S1))
+      .customFor({{S32, S16}, {S32, S8}}) // Added 32-bit support
       .maxScalar(0, S8)
       .unsupported();
+
 
   // Type Conversions
 
@@ -116,9 +123,11 @@ MOSLegalizerInfo::MOSLegalizerInfo(const MOSSubtarget &STI) {
       .legalFor({{P, IntPtr}, {PZ, S8}})
       .scalarSameSizeAs(1, 0)
       .unsupported();
+
   getActionDefinitionsBuilder(G_PTRTOINT)
       .legalFor({{IntPtr, P}, {S8, PZ}})
       .scalarSameSizeAs(0, 1)
+      .customFor({{S16, P}}) // Add this line
       .unsupported();
   getActionDefinitionsBuilder(G_ADDRSPACE_CAST)
       .customForCartesianProduct({P, PZ})
@@ -128,11 +137,14 @@ MOSLegalizerInfo::MOSLegalizerInfo(const MOSSubtarget &STI) {
 
   getActionDefinitionsBuilder({G_EXTRACT, G_INSERT}).lower();
 
-  getActionDefinitionsBuilder(G_MERGE_VALUES)
-      .legalForCartesianProduct({IntPtr, P}, {S8, PZ})
+getActionDefinitionsBuilder(G_MERGE_VALUES)
+      .legalForCartesianProduct({S16, IntPtr, P}, {S8, PZ}) // Added S16 explicitly
+      .legalForCartesianProduct({S32}, {S16, S8})           // 32-bit support
       .unsupported();
-getActionDefinitionsBuilder(G_UNMERGE_VALUES)
-      .legalForCartesianProduct({S8, S16, PZ}, {IntPtr, P}) // Added S16
+
+  getActionDefinitionsBuilder(G_UNMERGE_VALUES)
+      .legalForCartesianProduct({S8, S16, PZ}, {S16, IntPtr, P}) // Added S16 explicitly
+      .legalForCartesianProduct({S16, S8}, {S32})                // 32-bit support
       .unsupported();
 
   getActionDefinitionsBuilder(G_BSWAP)
@@ -199,7 +211,7 @@ getActionDefinitionsBuilder(G_UNMERGE_VALUES)
       .custom();
 
   getActionDefinitionsBuilder(G_ICMP)
-      .customFor({{S1, P}, {S1, S8}})
+      .customFor({{S1, P}, {S1, S8}, {S1, S32}}) // Added S32 comparison support
       .widenScalarToNextMultipleOf(1, 8)
       .custom();
 
@@ -211,11 +223,13 @@ getActionDefinitionsBuilder(G_UNMERGE_VALUES)
       .unsupported();
 
   getActionDefinitionsBuilder(G_PTR_ADD)
-      .customFor({{P, IntPtr}, {PZ, S8}})
+      .customFor({{P, IntPtr}, {PZ, S8}, {LLT::pointer(0, 32), LLT::scalar(32)}, {LLT::pointer(0, 16), LLT::scalar(16)}})
       .scalarSameSizeAs(1, 0)
       .unsupported();
+
+  // Update G_PTRMASK
   getActionDefinitionsBuilder(G_PTRMASK)
-      .customFor({{P, IntPtr}, {PZ, S8}})
+      .customFor({{P, IntPtr}, {PZ, S8}, {LLT::pointer(0, 32), LLT::scalar(32)}}) // Added 32-bit mask
       .scalarSameSizeAs(1, 0)
       .unsupported();
 
@@ -322,11 +336,14 @@ getActionDefinitionsBuilder(G_UNMERGE_VALUES)
 
   // Memory Operations
 
-  getActionDefinitionsBuilder({G_LOAD, G_STORE})
+getActionDefinitionsBuilder({G_LOAD, G_STORE})
       // Convert to int to load/store; that way the operation can be narrowed to
       // 8 bits. Once 8-bit, select an addressing mode to replace the generic
       // G_LOAD and G_STORE.
-      .customForCartesianProduct({S8, PZ, P}, {PZ, P})
+      // FIX: Added LLT::pointer(0, 16) support for W65816 stack operations
+      .customForCartesianProduct(
+          {S8, PZ, P, LLT::pointer(0, 32), LLT::pointer(0, 16)}, 
+          {PZ, P, LLT::pointer(0, 32), LLT::pointer(0, 16)}) 
       .widenScalarToNextMultipleOf(0, 8)
       .maxScalar(0, S8)
       .unsupported();
@@ -477,6 +494,73 @@ bool MOSLegalizerInfo::legalizeCustom(LegalizerHelper &Helper, MachineInstr &MI,
   switch (MI.getOpcode()) {
   default:
     llvm_unreachable("Invalid opcode for custom legalization.");
+case G_TRUNC: {
+    Register Dst = MI.getOperand(0).getReg();
+    Register Src = MI.getOperand(1).getReg();
+    LLT DstTy = MRI.getType(Dst);
+    LLT SrcTy = MRI.getType(Src);
+    
+    // Case 1: Handle truncation of pointer source (p0 -> s16)
+    if (SrcTy.isPointer()) {
+      LLT IntTy = LLT::scalar(SrcTy.getSizeInBits());
+      auto PtrToInt = Helper.MIRBuilder.buildPtrToInt(IntTy, Src);
+      Helper.MIRBuilder.buildTrunc(Dst, PtrToInt);
+      MI.eraseFromParent();
+      return true;
+    }
+
+    // Case 2: Handle truncation/cast to pointer destination (s16 -> p0)
+    if (DstTy.isPointer()) {
+       LLT IntDstTy = LLT::scalar(DstTy.getSizeInBits());
+       Register Tmp = Src;
+       
+       if (IntDstTy.getSizeInBits() < SrcTy.getSizeInBits()) {
+           Tmp = Helper.MIRBuilder.buildTrunc(IntDstTy, Src).getReg(0);
+       } else if (IntDstTy.getSizeInBits() > SrcTy.getSizeInBits()) {
+           Tmp = Helper.MIRBuilder.buildAnyExt(IntDstTy, Src).getReg(0);
+       }
+       
+       Helper.MIRBuilder.buildIntToPtr(Dst, Tmp);
+       MI.eraseFromParent();
+       return true;
+    }
+    
+    // Case 3: Handle truncation of 32-bit int (s32 -> s16 or s32 -> s8)
+    if (SrcTy.getSizeInBits() == 32) {
+        if (DstTy.getSizeInBits() == 16) {
+           auto Unmerge = Helper.MIRBuilder.buildUnmerge(LLT::scalar(16), Src);
+           Helper.MIRBuilder.buildCopy(Dst, Unmerge.getReg(0));
+           MI.eraseFromParent();
+           return true;
+        }
+        if (DstTy.getSizeInBits() == 8) {
+           // Fix for: unable to legalize instruction: (s8) = G_TRUNC (s32)
+           // Unmerge s32 into four s8 parts, copy the first (LSB) to Dst
+           auto Unmerge = Helper.MIRBuilder.buildUnmerge(LLT::scalar(8), Src);
+           Helper.MIRBuilder.buildCopy(Dst, Unmerge.getReg(0));
+           MI.eraseFromParent();
+           return true;
+        }
+    }
+    return false;
+  }
+
+  case G_PTRTOINT: {
+    Register Dst = MI.getOperand(0).getReg();
+    Register Src = MI.getOperand(1).getReg();
+    LLT DstTy = MRI.getType(Dst);
+    LLT SrcTy = MRI.getType(Src);
+    
+    // Handle narrowing ptrtoint (p0(32) -> s16)
+    if (SrcTy.isPointer() && DstTy.getSizeInBits() < SrcTy.getSizeInBits()) {
+       LLT IntTy = LLT::scalar(SrcTy.getSizeInBits());
+       auto PtrToInt = Helper.MIRBuilder.buildPtrToInt(IntTy, Src);
+       Helper.MIRBuilder.buildTrunc(Dst, PtrToInt);
+       MI.eraseFromParent();
+       return true;
+    }
+    return false;
+  }
   // Integer Extension and Truncation
   case G_ANYEXT:
     return legalizeAnyExt(Helper, MRI, MI);
@@ -589,11 +673,49 @@ static auto unmergeDefsSplitHigh(MachineInstr *MI) {
 bool MOSLegalizerInfo::legalizeAnyExt(LegalizerHelper &Helper,
                                       MachineRegisterInfo &MRI,
                                       MachineInstr &MI) const {
+  Register Dst = MI.getOperand(0).getReg();
+  Register Src = MI.getOperand(1).getReg();
+  LLT DstTy = MRI.getType(Dst);
+  LLT SrcTy = MRI.getType(Src);
+
+  // Handle 32-bit destinations (e.g. for W65816 pointers)
+  if (DstTy.getSizeInBits() == 32) {
+    auto &Builder = Helper.MIRBuilder;
+    LLT S8 = LLT::scalar(8);
+    SmallVector<Register, 4> Parts;
+
+    // Breakdown source into 8-bit parts
+    if (SrcTy.getSizeInBits() == 16) {
+      auto Unmerge = Builder.buildUnmerge(S8, Src);
+      Parts.push_back(Unmerge.getReg(0));
+      Parts.push_back(Unmerge.getReg(1));
+    } else if (SrcTy.getSizeInBits() == 8) {
+      Parts.push_back(Src);
+    } else if (SrcTy.getSizeInBits() == 1) {
+      // Promote s1 to s8 via ZEXT (handled by legalizeZExt)
+      auto ZExt8 = Builder.buildZExt(S8, Src);
+      Parts.push_back(ZExt8.getReg(0));
+    } else {
+      return false; // Unsupported source size
+    }
+
+    // Fill high bytes with Undef
+    while (Parts.size() < 4) {
+      Parts.push_back(Builder.buildUndef(S8).getReg(0));
+    }
+
+    Builder.buildMergeValues(Dst, Parts);
+    MI.eraseFromParent();
+    return true;
+  }
+
+  // Fallback for other cases (e.g. s1 -> s8/s16): convert to ZEXT
   Helper.Observer.changingInstr(MI);
   MI.setDesc(Helper.MIRBuilder.getTII().get(G_ZEXT));
   Helper.Observer.changedInstr(MI);
   return true;
 }
+
 
 bool MOSLegalizerInfo::legalizeSExt(LegalizerHelper &Helper,
                                     MachineRegisterInfo &MRI,
@@ -609,30 +731,39 @@ bool MOSLegalizerInfo::legalizeSExt(LegalizerHelper &Helper,
     auto Zero = Builder.buildConstant(DstTy, 0);
     Builder.buildSelect(Dst, Src, NegOne, Zero);
   } else {
-    auto Neg = Builder.buildICmp(CmpInst::ICMP_SLT, S1, Src,
-                                 Builder.buildConstant(SrcTy, 0));
+    // Determine the sign bit (High bit of source)
+    Register Sign;
+    if (SrcTy == S8) {
+      auto Zero = Builder.buildConstant(S8, 0);
+      Sign = Builder.buildICmp(CmpInst::ICMP_SLT, S1, Src, Zero).getReg(0);
+    } else {
+      // For s16 source, we need the high byte
+      auto Unmerge = Builder.buildUnmerge(S8, Src);
+      Register HighByte = Unmerge.getReg(Unmerge->getNumDefs() - 1);
+      auto Zero = Builder.buildConstant(S8, 0);
+      Sign = Builder.buildICmp(CmpInst::ICMP_SLT, S1, HighByte, Zero).getReg(0);
+    }
+
     auto NegOne = Builder.buildConstant(S8, -1);
     auto Zero = Builder.buildConstant(S8, 0);
-
-    Register Fill = Builder.buildSelect(S8, Neg, NegOne, Zero).getReg(0);
+    Register Fill = Builder.buildSelect(S8, Sign, NegOne, Zero).getReg(0);
 
     SmallVector<Register> Parts;
-    unsigned Bits;
+    
+    // Breakdown source
     if (SrcTy == S8) {
       Parts.push_back(Src);
-      Bits = 8;
-    } else {
+    } else if (SrcTy == LLT::scalar(16)) {
       auto Unmerge = Builder.buildUnmerge(S8, Src);
-      Bits = 0;
-      for (MachineOperand &Op : unmergeDefs(Unmerge)) {
-        Parts.push_back(Op.getReg());
-        Bits += 8;
-      }
+      Parts.push_back(Unmerge.getReg(0));
+      Parts.push_back(Unmerge.getReg(1));
     }
-    while (Bits < DstTy.getSizeInBits()) {
+
+    // Fill the rest with the sign extension byte
+    while (Parts.size() * 8 < DstTy.getSizeInBits()) {
       Parts.push_back(Fill);
-      Bits += 8;
     }
+    
     Builder.buildMergeValues(Dst, Parts);
   }
 
@@ -640,14 +771,49 @@ bool MOSLegalizerInfo::legalizeSExt(LegalizerHelper &Helper,
   return true;
 }
 
+
 bool MOSLegalizerInfo::legalizeZExt(LegalizerHelper &Helper,
                                     MachineRegisterInfo &MRI,
                                     MachineInstr &MI) const {
   MachineIRBuilder &Builder = Helper.MIRBuilder;
   auto [Dst, Src] = MI.getFirst2Regs();
   LLT DstTy = MRI.getType(Dst);
+  LLT SrcTy = MRI.getType(Src);
+  LLT S8 = LLT::scalar(8);
 
-  assert(MRI.getType(Src) == LLT::scalar(1));
+  if (SrcTy == LLT::scalar(1)) {
+    auto One = Builder.buildConstant(DstTy, 1);
+    auto Zero = Builder.buildConstant(DstTy, 0);
+    Builder.buildSelect(Dst, Src, One, Zero);
+    MI.eraseFromParent();
+    return true;
+  }
+
+  // Handle s8/s16 -> s32
+  if (DstTy.getSizeInBits() == 32) {
+    SmallVector<Register, 4> Parts;
+    
+    // Deconstruct source
+    if (SrcTy == S8) {
+      Parts.push_back(Src);
+    } else if (SrcTy == LLT::scalar(16)) {
+      auto Unmerge = Builder.buildUnmerge(S8, Src);
+      Parts.push_back(Unmerge.getReg(0));
+      Parts.push_back(Unmerge.getReg(1));
+    }
+
+    // Fill high bytes with Zero
+    auto Zero8 = Builder.buildConstant(S8, 0).getReg(0);
+    while (Parts.size() < 4) {
+      Parts.push_back(Zero8);
+    }
+
+    Builder.buildMergeValues(Dst, Parts);
+    MI.eraseFromParent();
+    return true;
+  }
+
+  // Fallback for standard handling (should generally be unreachable with the above)
   auto One = Builder.buildConstant(DstTy, 1);
   auto Zero = Builder.buildConstant(DstTy, 0);
   Builder.buildSelect(Dst, Src, One, Zero);
@@ -1706,12 +1872,20 @@ bool MOSLegalizerInfo::selectAddressingMode(LegalizerHelper &Helper,
       return true;
     return selectIndirectAddressing(Helper, MRI, MI);
   }
+  case 32: {
+    if (tryAbsoluteAddressing(Helper, MRI, MI, false))
+      return true;
+    // TODO: Implement Absolute Indexed Long if needed
+    return selectIndirectAddressing(Helper, MRI, MI);
+  }
   default:
     llvm_unreachable("unknown pointer size");
   }
 }
 
+
 std::optional<MachineOperand>
+
 MOSLegalizerInfo::matchAbsoluteAddressing(MachineRegisterInfo &MRI,
                                           Register Addr) const {
   int64_t Offset = 0;
@@ -1730,6 +1904,11 @@ MOSLegalizerInfo::matchAbsoluteAddressing(MachineRegisterInfo &MRI,
       if (willBeStaticallyAllocated(FI)) {
         return MachineOperand::CreateFI(FI.getIndex(), FI.getOffset() + Offset);
       }
+    }
+    // Added: Look through G_INTTOPTR
+    if (const MachineInstr *IntToPtr = getOpcodeDef(G_INTTOPTR, Addr, MRI)) {
+      Addr = IntToPtr->getOperand(1).getReg();
+      continue;
     }
     if (const auto *PtrAddAddr =
             cast_if_present<GPtrAdd>(getOpcodeDef(G_PTR_ADD, Addr, MRI))) {
@@ -1752,7 +1931,15 @@ bool MOSLegalizerInfo::tryAbsoluteAddressing(LegalizerHelper &Helper,
   MachineIRBuilder &Builder = Helper.MIRBuilder;
   const MOSSubtarget &STI = Builder.getMF().getSubtarget<MOSSubtarget>();
 
-  unsigned Opcode = isa<GLoad>(MI) ? MOS::G_LOAD_ABS : MOS::G_STORE_ABS;
+  unsigned PtrSize = MRI.getType(MI.getPointerReg()).getSizeInBits();
+  bool IsLong = PtrSize == 32;
+
+  unsigned Opcode;
+  if (isa<GLoad>(MI))
+    Opcode = IsLong ? MOS::G_LOAD_ABS_LONG : MOS::G_LOAD_ABS;
+  else
+    Opcode = IsLong ? MOS::G_STORE_ABS_LONG : MOS::G_STORE_ABS;
+
   auto Operand = matchAbsoluteAddressing(MRI, MI.getPointerReg());
 
   if (Operand.has_value()) {
@@ -1770,6 +1957,7 @@ bool MOSLegalizerInfo::tryAbsoluteAddressing(LegalizerHelper &Helper,
 
   return false;
 }
+
 
 bool MOSLegalizerInfo::tryAbsoluteIndexedAddressing(LegalizerHelper &Helper,
                                                     MachineRegisterInfo &MRI,
@@ -1915,9 +2103,16 @@ bool MOSLegalizerInfo::selectIndirectAddressing(LegalizerHelper &Helper,
 
   Register Addr = MI.getPointerReg();
   Register Index = 0;
+  
+  // Check for 32-bit pointer (W65816 Long addressing)
+  bool IsLong = MRI.getType(Addr).getSizeInBits() == 32;
 
-  unsigned Opcode =
-      isa<GLoad>(MI) ? MOS::G_LOAD_INDIR_IDX : MOS::G_STORE_INDIR_IDX;
+  unsigned Opcode;
+  // Pre-calculate opcode for later use
+  if (IsLong)
+    Opcode = isa<GLoad>(MI) ? MOS::G_LOAD_INDIR_LONG_IDX : MOS::G_STORE_INDIR_LONG_IDX;
+  else
+    Opcode = isa<GLoad>(MI) ? MOS::G_LOAD_INDIR_IDX : MOS::G_STORE_INDIR_IDX;
 
   if (const auto *PtrAddAddr =
           cast_if_present<GPtrAdd>(getOpcodeDef(G_PTR_ADD, Addr, MRI))) {
@@ -1948,6 +2143,18 @@ bool MOSLegalizerInfo::selectIndirectAddressing(LegalizerHelper &Helper,
   }
 
   if (!Index) {
+    if (IsLong) {
+        Opcode = isa<GLoad>(MI) ? MOS::G_LOAD_INDIR_LONG : MOS::G_STORE_INDIR_LONG;
+        // Convert pointer to integer (s32) for the Imag24 register class
+        auto AddrInt = Builder.buildPtrToInt(LLT::scalar(32), Addr);
+        Builder.buildInstr(Opcode)
+          .add(MI.getOperand(0))
+          .addUse(AddrInt.getReg(0))
+          .addMemOperand(*MI.memoperands_begin());
+        MI.eraseFromParent();
+        return true;
+    }
+
     if (STI.has65C02()) {
       Opcode = isa<GLoad>(MI) ? MOS::G_LOAD_INDIR : MOS::G_STORE_INDIR;
       Builder.buildInstr(Opcode)
@@ -1959,11 +2166,22 @@ bool MOSLegalizerInfo::selectIndirectAddressing(LegalizerHelper &Helper,
     }
     Index = Builder.buildConstant(S8, 0).getReg(0);
   }
-  Builder.buildInstr(Opcode)
-      .add(MI.getOperand(0))
-      .addUse(Addr)
-      .addUse(Index)
-      .addMemOperand(*MI.memoperands_begin());
+  
+  // Handle Indexed cases
+  if (IsLong) {
+      auto AddrInt = Builder.buildPtrToInt(LLT::scalar(32), Addr);
+      Builder.buildInstr(Opcode)
+          .add(MI.getOperand(0))
+          .addUse(AddrInt.getReg(0))
+          .addUse(Index)
+          .addMemOperand(*MI.memoperands_begin());
+  } else {
+      Builder.buildInstr(Opcode)
+          .add(MI.getOperand(0))
+          .addUse(Addr)
+          .addUse(Index)
+          .addMemOperand(*MI.memoperands_begin());
+  }
   MI.eraseFromParent();
   return true;
 }

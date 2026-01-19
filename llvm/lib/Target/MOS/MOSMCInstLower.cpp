@@ -762,6 +762,52 @@ void MOSMCInstLower::lower(const MachineInstr *MI, MCInst &OutMI) {
     if (lowerOperand(MO, Op)) OutMI.addOperand(Op);
     return;
   }
+  case MOS::LDAbsLong: {
+    OutMI.setOpcode(MOS::LDA_AbsoluteLong);
+    MCOperand Val;
+    if (!lowerOperand(MI->getOperand(1), Val))
+      llvm_unreachable("Failed to lower operand");
+    OutMI.addOperand(Val);
+    return;
+  }
+  case MOS::STAbsLong: {
+    OutMI.setOpcode(MOS::STA_AbsoluteLong);
+    MCOperand Val;
+    if (!lowerOperand(MI->getOperand(1), Val))
+      llvm_unreachable("Failed to lower operand");
+    OutMI.addOperand(Val);
+    return;
+  }
+
+  case MOS::LDIndirLong:
+    OutMI.setOpcode(MOS::LDA_IndirectLong);
+    goto handle_indir_long;
+  case MOS::LDIndirLongIdx:
+    OutMI.setOpcode(MOS::LDA_IndirectIndexedLong);
+    goto handle_indir_long;
+  case MOS::STIndirLong:
+    OutMI.setOpcode(MOS::STA_IndirectLong);
+    goto handle_indir_long;
+  case MOS::STIndirLongIdx:
+    OutMI.setOpcode(MOS::STA_IndirectIndexedLong);
+    goto handle_indir_long;
+
+  handle_indir_long: {
+     // Operand 1 is the register holding the address (Imag24)
+     const MachineOperand &MO = MI->getOperand(1);
+     if (MO.isReg()) {
+       Register Reg = MO.getReg();
+       const MOSRegisterInfo &TRI = *MI->getMF()->getSubtarget<MOSSubtarget>().getRegisterInfo();
+       const MCExpr *Expr = MCSymbolRefExpr::create(
+          Ctx.getOrCreateSymbol(TRI.getImag8SymbolName(Reg)), Ctx);
+       OutMI.addOperand(MCOperand::createExpr(Expr));
+     } else {
+       MCOperand Op;
+       if (!lowerOperand(MO, Op)) llvm_unreachable("Failed to lower operand");
+       OutMI.addOperand(Op);
+     }
+     return;
+  }
   }
 
   // Handle any real instructions that weren't generated from a pseudo.

@@ -18,8 +18,9 @@ using namespace clang::targets;
 
 MOSTargetInfo::MOSTargetInfo(const llvm::Triple &Triple, const TargetOptions &)
     : TargetInfo(Triple) {
+  // DEFAULT: 16-bit pointers (p:16:8) for standard 6502 family
   static const char Layout[] =
-      "e-m:e-p:32:8-p1:8:8-i16:8-i32:8-i64:8-f32:8-f64:8-a:8-Fi8-n8";
+      "e-m:e-p:16:8-p1:8:8-i16:8-i32:8-i64:8-f32:8-f64:8-a:8-Fi8-n8";
   resetDataLayout(Layout);
 
   PointerWidth = 16;
@@ -52,13 +53,28 @@ MOSTargetInfo::MOSTargetInfo(const llvm::Triple &Triple, const TargetOptions &)
   Char32Type = UnsignedLong;
   Int16Type = SignedInt;
   SigAtomicType = UnsignedChar;
+  
+  // REMOVED: The forced 32-bit overwrite block was here. 
+  // It is now handled in setCPU below.
+}
 
-
-  PointerWidth = 32;
-  PointerAlign = 8;
-  SizeType = UnsignedLong;    // 32-bit
-  PtrDiffType = SignedLong;   // 32-bit
-  IntPtrType = SignedLong;    // 32-bit
+bool MOSTargetInfo::setCPU(const std::string &Name) {
+  if (isValidCPUName(Name)) {
+    CPUName = Name;
+    
+    // If targeting W65816, switch to 32-bit (24-bit storage) pointers
+    if (Name == "mosw65816") {
+      resetDataLayout("e-m:e-p:32:8-p1:8:8-i16:8-i32:8-i64:8-f32:8-f64:8-a:8-Fi8-n8");
+      PointerWidth = 32;
+      PointerAlign = 8;
+      SizeType = UnsignedLong;    // 32-bit
+      PtrDiffType = SignedLong;   // 32-bit
+      IntPtrType = SignedLong;    // 32-bit
+    }
+    
+    return true;
+  }
+  return false;
 }
 
 bool MOSTargetInfo::validateAsmConstraint(
@@ -212,7 +228,9 @@ uint64_t MOSTargetInfo::getPointerWidthV(LangAS AddrSpace) const {
   case 1: // Zero page memory
     return 8;
   default:
-    return 16;
+    // If PointerWidth is 32 (set by setCPU for W65816), return 32.
+    // Otherwise return 16.
+    return PointerWidth;
   }
 }
 
@@ -228,14 +246,6 @@ bool MOSTargetInfo::isValidCPUName(StringRef Name) const {
 
 void MOSTargetInfo::fillValidCPUList(SmallVectorImpl<StringRef> &Values) const {
   Values.append(std::begin(ValidCPUNames), std::end(ValidCPUNames));
-}
-
-bool MOSTargetInfo::setCPU(const std::string &Name) {
-  if (isValidCPUName(Name)) {
-    CPUName = Name;
-    return true;
-  }
-  return false;
 }
 
 void MOSTargetInfo::getTargetDefines(const LangOptions &Opts,

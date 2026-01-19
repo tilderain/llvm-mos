@@ -255,9 +255,15 @@ bool MOSInstructionSelector::select(MachineInstr &MI) {
   case MOS::G_LOAD_ABS_IDX:
   case MOS::G_LOAD_INDIR:
   case MOS::G_LOAD_INDIR_IDX:
+  case MOS::G_LOAD_ABS_LONG:        // Add this line
+  case MOS::G_LOAD_INDIR_LONG:      // Add this line
+  case MOS::G_LOAD_INDIR_LONG_IDX:  // Add this line
   case MOS::G_PHI:
   case MOS::G_STORE_INDIR:
   case MOS::G_STORE_INDIR_IDX:
+  case MOS::G_STORE_ABS_LONG:       // Add this line
+  case MOS::G_STORE_INDIR_LONG:     // Add this line
+  case MOS::G_STORE_INDIR_LONG_IDX: // Add this line
   case MOS::G_BRINDIRECT_IDX:
     return selectGeneric(MI);
   }
@@ -1361,9 +1367,19 @@ bool MOSInstructionSelector::selectAddr(MachineInstr &MI) {
   Register Dst = MI.getOperand(0).getReg();
   LLT Ty = Builder.getMRI()->getType(Dst);
 
-  // Handle 32-bit address/constant loads (for 24-bit pointers)
   if (Ty.getSizeInBits() == 32) {
     Register Scratch = Builder.getMRI()->createVirtualRegister(&MOS::GPRRegClass);
+    
+    // If Dst is a pointer (p0), we need to handle it carefully.
+    // LDImm32 produces an Imag24 value (i32).
+    // We create a temporary i32 register, load into it, and then update Dst.
+    // Note: Since we are in InstructionSelect, types are less strict, but register classes matter.
+    // Dst needs to be constrained to Imag24.
+    
+    // Simplest approach: Use LDImm32 directly on Dst.
+    // The previous error was unrelated to this specific instruction, but to G_STORE_INDIR.
+    // However, ensuring Dst is treated as compatible with Imag24 is good practice.
+    
     auto Instr = Builder.buildInstr(MOS::LDImm32, {Dst, Scratch}, {}).add(Op);
     if (!constrainSelectedInstRegOperands(*Instr, TII, TRI, RBI))
       return false;
@@ -1377,7 +1393,6 @@ bool MOSInstructionSelector::selectAddr(MachineInstr &MI) {
   MI.eraseFromParent();
   return true;
 }
-
 std::pair<Register, Register>
 MOSInstructionSelector::selectAddrLoHi(MachineInstr &MI) {
   MachineIRBuilder Builder(MI);
@@ -1828,21 +1843,46 @@ bool MOSInstructionSelector::selectLshrShlE(MachineInstr &MI) {
   return true;
 }
 
+
 bool MOSInstructionSelector::selectTrunc(MachineInstr &MI) {
   MachineIRBuilder Builder(MI);
+  MachineRegisterInfo &MRI = *Builder.getMRI();
 
+  Register Dst = MI.getOperand(0).getReg();
+  Register Src = MI.getOperand(1).getReg();
+  LLT DstTy = MRI.getType(Dst);
+  LLT SrcTy = MRI.getType(Src);
+
+  LLT S1 = LLT::scalar(1);
   LLT S8 = LLT::scalar(8);
+  LLT S16 = LLT::scalar(16);
 
-  Register From = MI.getOperand(1).getReg();
+  // Handle s1 <- s16: Truncate to s8 first
+  if (DstTy == S1 && SrcTy == S16) {
+    MachineInstrSpan MIS(MI, MI.getParent());
+    MI.getOperand(1).setReg(Builder.buildTrunc(S8, Src).getReg(0));
+    return selectAll(MIS);
+  }
 
-  assert(Builder.getMRI()->getType(From) == LLT::scalar(16));
-  assert(Builder.getMRI()->getType(MI.getOperand(0).getReg()) ==
-         LLT::scalar(1));
+  // Handle s8 <- s16: Extract low byte
+  if (DstTy == S8 && SrcTy == S16) {
+    auto Copy = Builder.buildCopy(Dst, Src);
+    Copy->getOperand(1).setSubReg(MOS::sublo);
+    constrainGenericOp(*Copy);
+    MI.eraseFromParent();
+    return true;
+  }
 
-  MachineInstrSpan MIS(MI, MI.getParent());
-  MI.getOperand(1).setReg(Builder.buildTrunc(S8, From).getReg(0));
-  selectAll(MIS);
-  return true;
+  // Handle s16 <- s32: Extract low 16 bits (W65816)
+  if (DstTy == S16 && SrcTy.getSizeInBits() == 32) {
+    auto Copy = Builder.buildCopy(Dst, Src);
+    Copy->getOperand(1).setSubReg(MOS::sublo16);
+    constrainGenericOp(*Copy);
+    MI.eraseFromParent();
+    return true;
+  }
+
+  return false;
 }
 
 bool MOSInstructionSelector::selectAddE(MachineInstr &MI) {
@@ -2162,6 +2202,25 @@ bool MOSInstructionSelector::selectGeneric(MachineInstr &MI) {
     break;
   case MOS::G_STORE_INDIR_IDX:
     Opcode = MOS::STIndirIdx;
+    break;
+  case MOS::G_LOAD_ABS_LONG:
+    Opcode = MOS::LDAbsLong;
+    break;
+  case MOS::G_STORE_ABS_LONG:
+    Opcode = MOS::STAbsLong;
+    break;
+
+  case MOS::G_LOAD_INDIR_LONG:
+    Opcode = MOS::LDIndirLong;
+    break;
+  case MOS::G_LOAD_INDIR_LONG_IDX:
+    Opcode = MOS::LDIndirLongIdx;
+    break;
+  case MOS::G_STORE_INDIR_LONG:
+    Opcode = MOS::STIndirLong;
+    break;
+  case MOS::G_STORE_INDIR_LONG_IDX:
+    Opcode = MOS::STIndirLongIdx;
     break;
   }
   MI.setDesc(TII.get(Opcode));
