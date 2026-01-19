@@ -146,6 +146,33 @@ def G_STORE_INDIR : MOSGenericInstruction {
   let mayStore = true;
 }
 
+//def type2 : GenericTypeProfile<2>;
+
+
+def G_LOAD_INDIR_LONG : MOSGenericInstruction {
+  let OutOperandList = (outs type0:$dst);
+  let InOperandList = (ins type1:$base); // Was ptype1
+  let mayLoad = true;
+}
+
+def G_LOAD_INDIR_LONG_IDX : MOSGenericInstruction {
+  let OutOperandList = (outs type0:$dst);
+  let InOperandList = (ins type1:$base, type2:$index); // Was ptype1, type1. Use distinct type indices.
+  let mayLoad = true;
+}
+
+def G_STORE_INDIR_LONG : MOSGenericInstruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins type0:$src, type1:$base); // Was ptype1
+  let mayStore = true;
+}
+
+def G_STORE_INDIR_LONG_IDX : MOSGenericInstruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins type0:$src, type1:$base, type2:$index); // Was ptype1, type1
+  let mayStore = true;
+}
+
 // Generalized 8-bit store using the indirect indexed addressing mode. The index
 // argument is an 8-bit scalar. Additionally expects a MachineMemOperand.
 def G_STORE_INDIR_IDX : MOSGenericInstruction {

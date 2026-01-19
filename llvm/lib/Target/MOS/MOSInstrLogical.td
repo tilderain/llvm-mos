@@ -641,3 +641,23 @@ def LDAbsLong : MOSLoad {
 def STAbsLong : MOSStore {
   dag InOperandList = (ins Ac:$src, addr24:$dst);
 }
+
+
+// Long Indirect: [dp] and [dp], y
+def LDIndirLong : MOSLoad {
+  dag OutOperandList = (outs Ac:$dst);
+  dag InOperandList = (ins Imag24:$addr);
+}
+
+def LDIndirLongIdx : MOSLoad {
+  dag OutOperandList = (outs Ac:$dst);
+  dag InOperandList = (ins Imag24:$addr, Yc:$offset);
+}
+
+def STIndirLong : MOSStore {
+  dag InOperandList = (ins Ac:$src, Imag24:$addr);
+}
+
+def STIndirLongIdx : MOSStore {
+  dag InOperandList = (ins Ac:$src, Imag24:$addr, Yc:$offset);
+}
