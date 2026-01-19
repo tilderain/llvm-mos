@@ -26,6 +26,8 @@
 #include "llvm/MC/MCExpr.h"
 #include "llvm/Support/ErrorHandling.h"
 
+#include "llvm/MC/MCStreamer.h"
+
 using namespace llvm;
 
 #define DEBUG_TYPE "mos-mcinstlower"
@@ -65,6 +67,8 @@ static MCOperand wrapAbsoluteIdxBase(const MachineInstr *MI, MCOperand Op,
 }
 
 void MOSMCInstLower::lower(const MachineInstr *MI, MCInst &OutMI) {
+  const auto &STI = MI->getMF()->getSubtarget<MOSSubtarget>();
+
   switch (MI->getOpcode()) {
   default:
     OutMI.setOpcode(MI->getOpcode());
@@ -382,19 +386,65 @@ void MOSMCInstLower::lower(const MachineInstr *MI, MCInst &OutMI) {
     OutMI.addOperand(Tgt);
     return;
   }
-  case MOS::LDImm:
+case MOS::LDImm:
   case MOS::LDAbs:
   case MOS::LDImag8:
   case MOS::STAbs: {
     if (MOS::Imag8RegClass.contains(MI->getOperand(0).getReg())) {
-      OutMI.setOpcode(MOS::SPC700_MOV_ZeroPageImmediate);
-      MCOperand Dst, Val;
-      if (!lowerOperand(MI->getOperand(0), Dst))
-        llvm_unreachable("Failed to lower operand");
-      OutMI.addOperand(Dst);
-      if (!lowerOperand(MI->getOperand(1), Val))
-        llvm_unreachable("Failed to lower operand");
-      OutMI.addOperand(Val);
+      // SPC700 can move immediate to zero page directly.
+      if (STI.hasSPC700()) {
+        OutMI.setOpcode(MOS::SPC700_MOV_ZeroPageImmediate);
+        MCOperand Dst, Val;
+        if (!lowerOperand(MI->getOperand(0), Dst))
+          llvm_unreachable("Failed to lower operand");
+        OutMI.addOperand(Dst);
+        if (!lowerOperand(MI->getOperand(1), Val))
+          llvm_unreachable("Failed to lower operand");
+        OutMI.addOperand(Val);
+        return;
+      }
+
+      // Fallback for W65816/6502: Use A to load immediate to ZP
+      // Sequence: PHA, [SEP #$20], LDA #imm, STA zp, [REP #$20], PLA
+      // This is required because W65816 code generation can produce LDImm on Imag8
+      // registers when handling 24-bit pointers (Imag24 aliases Imag8).
+      
+      // We manually emit the sequence to the streamer, leaving the last instruction (PLA) for OutMI.
+      
+      // 1. PHA
+      MCInst PHA; PHA.setOpcode(MOS::PHA_Implied);
+      AP.OutStreamer->emitInstruction(PHA, STI);
+      
+      // 2. SEP #$20 (W65816 only - ensure 8-bit A for byte store)
+      if (STI.hasW65816()) {
+          MCInst SEP; SEP.setOpcode(MOS::SEP_Immediate);
+          SEP.addOperand(MCOperand::createImm(0x20));
+          AP.OutStreamer->emitInstruction(SEP, STI);
+      }
+      
+      // 3. LDA #imm
+      MCInst LDA; LDA.setOpcode(MOS::LDA_Immediate);
+      MCOperand Val;
+      if (!lowerOperand(MI->getOperand(1), Val)) llvm_unreachable("Failed to lower operand");
+      LDA.addOperand(Val);
+      AP.OutStreamer->emitInstruction(LDA, STI);
+      
+      // 4. STA zp
+      MCInst STA; STA.setOpcode(MOS::STA_ZeroPage);
+      MCOperand Dst;
+      if (!lowerOperand(MI->getOperand(0), Dst)) llvm_unreachable("Failed to lower operand");
+      STA.addOperand(Dst);
+      AP.OutStreamer->emitInstruction(STA, STI);
+      
+      // 5. REP #$20 (W65816 only - restore 16-bit A)
+      if (STI.hasW65816()) {
+          MCInst REP; REP.setOpcode(MOS::REP_Immediate);
+          REP.addOperand(MCOperand::createImm(0x20));
+          AP.OutStreamer->emitInstruction(REP, STI);
+      }
+      
+      // 6. PLA (Output as the final instruction)
+      OutMI.setOpcode(MOS::PLA_Implied);
       return;
     }
     switch (MI->getOperand(0).getReg()) {
@@ -980,6 +1030,16 @@ MCOperand MOSMCInstLower::lowerSymbolOperand(const MachineOperand &MO,
     } else {
       Expr = MOSMCExpr::create(MOSMCExpr::VK_ADDR16_HI, Expr,
                                /*isNegated=*/false, Ctx);
+    }
+    break;
+  case MOS::MO_UPPER:
+    // Extract the bank byte (bits 16-23).
+    // Uses VK_ADDR24_BANK which corresponds to the '^' modifier or relocation.
+    if (ZP) {
+        Expr = MCConstantExpr::create(0, Ctx);
+    } else {
+        Expr = MOSMCExpr::create(MOSMCExpr::VK_ADDR24_BANK, Expr,
+                                /*isNegated=*/false, Ctx);
     }
     break;
   case MOS::MO_HI_JT: {

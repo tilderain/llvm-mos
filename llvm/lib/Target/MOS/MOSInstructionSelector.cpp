@@ -1857,8 +1857,8 @@ bool MOSInstructionSelector::selectTrunc(MachineInstr &MI) {
   LLT S8 = LLT::scalar(8);
   LLT S16 = LLT::scalar(16);
 
-  // Handle s1 <- s16: Truncate to s8 first
-  if (DstTy == S1 && SrcTy == S16) {
+  // Handle s1 <- s16 or s1 <- s32: Truncate to s8 first
+  if (DstTy == S1 && (SrcTy == S16 || SrcTy.getSizeInBits() == 32)) {
     MachineInstrSpan MIS(MI, MI.getParent());
     MI.getOperand(1).setReg(Builder.buildTrunc(S8, Src).getReg(0));
     return selectAll(MIS);
@@ -1866,6 +1866,15 @@ bool MOSInstructionSelector::selectTrunc(MachineInstr &MI) {
 
   // Handle s8 <- s16: Extract low byte
   if (DstTy == S8 && SrcTy == S16) {
+    auto Copy = Builder.buildCopy(Dst, Src);
+    Copy->getOperand(1).setSubReg(MOS::sublo);
+    constrainGenericOp(*Copy);
+    MI.eraseFromParent();
+    return true;
+  }
+
+  // FIX: Handle s8 <- s32: Extract low byte (W65816 24-bit pointers)
+  if (DstTy == S8 && SrcTy.getSizeInBits() == 32) {
     auto Copy = Builder.buildCopy(Dst, Src);
     Copy->getOperand(1).setSubReg(MOS::sublo);
     constrainGenericOp(*Copy);

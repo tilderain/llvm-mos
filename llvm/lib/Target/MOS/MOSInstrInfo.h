@@ -166,6 +166,7 @@ enum TOF {
   MO_HI,
   MO_HI_JT,
   MO_ZEROPAGE,
+  MO_UPPER,
 };
 
 } // namespace MOS

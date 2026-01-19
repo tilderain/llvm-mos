@@ -74,18 +74,16 @@ MOSLegalizerInfo::MOSLegalizerInfo(const MOSSubtarget &STI) {
   LLT IntPtr = LLT::scalar(IsW65816 ? 32 : 16);
 
   // Constants
-
   getActionDefinitionsBuilder(G_CONSTANT)
-      .legalFor({S1, S8, P, PZ})
+      .legalFor({S1, S8, S16, S32, S64, P, PZ, LLT::pointer(0, 16), LLT::pointer(0, 32)})
       .widenScalarToNextMultipleOf(0, 8)
-      .maxScalar(0, S8)
       .unsupported();
 
   getActionDefinitionsBuilder(G_IMPLICIT_DEF)
-      .legalFor({S1, S8, P, PZ})
+      .legalFor({S1, S8, S16, S32, S64, P, PZ, LLT::pointer(0, 16), LLT::pointer(0, 32)})
       .widenScalarToNextMultipleOf(0, 8)
-      .maxScalar(0, S8)
       .unsupported();
+
 
 
 getActionDefinitionsBuilder({G_GLOBAL_VALUE, G_FRAME_INDEX, G_BLOCK_ADDR})
@@ -118,16 +116,19 @@ getActionDefinitionsBuilder(G_TRUNC)
 
 
   // Type Conversions
-
   getActionDefinitionsBuilder(G_INTTOPTR)
-      .legalFor({{P, IntPtr}, {PZ, S8}})
+      .legalFor({ {P, IntPtr}, {PZ, S8}, {LLT::pointer(0, 16), S16} })
+      // If converting a 16-bit stack address to a 24-bit pointer, widen the int to 32-bit first
+      .widenScalarIf(all(typeIs(0, P), typeIs(1, S16)), changeTo(1, IntPtr))
       .scalarSameSizeAs(1, 0)
       .unsupported();
 
   getActionDefinitionsBuilder(G_PTRTOINT)
-      .legalFor({{IntPtr, P}, {S8, PZ}})
+      .legalFor({ {IntPtr, P}, {S8, PZ}, {S16, LLT::pointer(0, 16)} })
+      // If converting a 24-bit pointer to a 16-bit near address, perform 32-bit conversion first
+      .narrowScalarIf(all(typeIs(1, P), typeIs(0, S16)), changeTo(0, IntPtr))
       .scalarSameSizeAs(0, 1)
-      .customFor({{S16, P}}) // Add this line
+      .customFor({{S16, P}}) 
       .unsupported();
   getActionDefinitionsBuilder(G_ADDRSPACE_CAST)
       .customForCartesianProduct({P, PZ})
@@ -137,14 +138,16 @@ getActionDefinitionsBuilder(G_TRUNC)
 
   getActionDefinitionsBuilder({G_EXTRACT, G_INSERT}).lower();
 
-getActionDefinitionsBuilder(G_MERGE_VALUES)
-      .legalForCartesianProduct({S16, IntPtr, P}, {S8, PZ}) // Added S16 explicitly
-      .legalForCartesianProduct({S32}, {S16, S8})           // 32-bit support
+  getActionDefinitionsBuilder(G_MERGE_VALUES)
+      // FIX: Added S64 to the allowed merge destinations.
+      // This allows the compiler to build 64-bit values from 8-bit or 16-bit parts.
+      .legalForCartesianProduct({S16, S32, S64, IntPtr, P}, {S8, S16, PZ})
       .unsupported();
 
   getActionDefinitionsBuilder(G_UNMERGE_VALUES)
-      .legalForCartesianProduct({S8, S16, PZ}, {S16, IntPtr, P}) // Added S16 explicitly
-      .legalForCartesianProduct({S16, S8}, {S32})                // 32-bit support
+      // FIX: Added S64 to the allowed unmerge sources.
+      // This allows the compiler to break 64-bit values back down into 8-bit or 16-bit parts.
+      .legalForCartesianProduct({S8, S16, S32, PZ}, {S16, S32, S64, IntPtr, P})
       .unsupported();
 
   getActionDefinitionsBuilder(G_BSWAP)
@@ -354,12 +357,12 @@ getActionDefinitionsBuilder({G_LOAD, G_STORE})
       .custom();
 
   // Control Flow
-
   getActionDefinitionsBuilder(G_PHI)
-      .legalFor({S1, S8, P, PZ})
-      .widenScalarToNextMultipleOf(0, 8)
-      .maxScalar(0, S8)
+      // FIX: Added S64 support to prevent legalization failures during 64-bit 
+      // libcall generation (like __udivdi3).
+      .legalFor({S1, S8, S16, S32, S64, P, PZ, LLT::pointer(0, 16), LLT::pointer(0, 32)})
       .unsupported();
+
 
   getActionDefinitionsBuilder(G_BRCOND).customFor({S1}).unsupported();
 
@@ -382,10 +385,11 @@ getActionDefinitionsBuilder({G_LOAD, G_STORE})
 
   getActionDefinitionsBuilder({G_STACKSAVE, G_STACKRESTORE}).lower();
 
-  getActionDefinitionsBuilder(G_FREEZE)
-      .customFor({S1, S8, P, PZ})
+getActionDefinitionsBuilder(G_FREEZE)
+      // FIX: Changed from .legalFor to .customFor
+      // This ensures G_FREEZE is always lowered to a COPY via legalizeCustom
+      .customFor({S1, S8, S16, S32, S64, P, PZ, LLT::pointer(0, 16), LLT::pointer(0, 32)})
       .widenScalarToNextMultipleOf(0, 8)
-      .maxScalar(0, S8)
       .unsupported();
 
   getLegacyLegalizerInfo().computeTables();

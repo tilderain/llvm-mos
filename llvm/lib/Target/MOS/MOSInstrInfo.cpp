@@ -1040,6 +1040,8 @@ bool MOSInstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
   return Changed;
 }
 
+
+// 2. Update expandLDImm32 to use the flags
 void MOSInstrInfo::expandLDImm32(MachineIRBuilder &Builder) const {
   auto &MI = *Builder.getInsertPt();
   const TargetRegisterInfo &TRI =
@@ -1052,26 +1054,30 @@ void MOSInstrInfo::expandLDImm32(MachineIRBuilder &Builder) const {
   // Subregisters and shifts for 4 bytes
   const unsigned SubRegs[] = {MOS::sublo, MOS::subhi, MOS::subupper, MOS::subtop};
   const unsigned Shifts[] = {0, 8, 16, 24};
-  // TODO: Add MO_UPPER / MO_TOP flags if/when available for symbol refs > 16-bit
-  const unsigned Flags[] = {MOS::MO_LO, MOS::MO_HI, 0, 0}; 
+  const unsigned Flags[] = {MOS::MO_LO, MOS::MO_HI, MOS::MO_UPPER, 0};
 
   for (int i = 0; i < 4; ++i) {
     Register SubReg = TRI.getSubReg(Dst, SubRegs[i]);
     auto Ld = Builder.buildInstr(MOS::LDImm);
     Ld.addDef(Scratch);
-    
+
     if (Src.isImm()) {
       Ld.addImm((Src.getImm() >> Shifts[i]) & 0xFF);
     } else {
-      MachineOperand MO = Src;
-      if (Flags[i])
-        MO.setTargetFlags(Flags[i]);
-      // Note: For symbols, lack of upper byte flags means this produces incorrect code 
-      // for bytes 2 and 3 if they are non-zero/non-trivial. 
-      // However, it fixes the compiler crash.
-      Ld.add(MO);
+      // For the 4th byte (bits 24-31) of a symbol address:
+      // Since W65816 uses 24-bit pointers, the top byte is always 0.
+      // We must emit immediate 0, otherwise the linker receives the full 
+      // symbol value for an 8-bit field with no modifier, causing overflow.
+      if (i == 3) {
+        Ld.addImm(0);
+      } else {
+        MachineOperand MO = Src;
+        if (Flags[i])
+          MO.setTargetFlags(Flags[i]);
+        Ld.add(MO);
+      }
     }
-    
+
     // Copy from scratch GPR to imaginary subregister (STImag8)
     copyPhysRegImpl(Builder, SubReg, Scratch);
   }
@@ -1406,6 +1412,7 @@ MOSInstrInfo::getSerializableDirectMachineOperandTargetFlags() const {
   static const std::pair<unsigned, const char *> Flags[] = {
       {MOS::MO_LO, "lo"},
       {MOS::MO_HI, "hi"},
+      {MOS::MO_UPPER, "upper"}, // Add this
       {MOS::MO_HI_JT, "hi-jt"},
       {MOS::MO_ZEROPAGE, "zeropage"}};
   return Flags;
