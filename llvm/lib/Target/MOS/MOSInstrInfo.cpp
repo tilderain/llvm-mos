@@ -662,7 +662,47 @@ void MOSInstrInfo::copyPhysRegImpl(MachineIRBuilder &Builder, Register DestReg,
                     TRI.getSubReg(SrcReg, MOS::sublo));
     copyPhysRegImpl(Builder, TRI.getSubReg(DestReg, MOS::subhi),
                     TRI.getSubReg(SrcReg, MOS::subhi));
+  // START FIX
+  } else if (AreClasses(MOS::Imag24RegClass, MOS::Imag24RegClass)) {
+    assert(SrcReg.isPhysical() && DestReg.isPhysical());
+    copyPhysRegImpl(Builder, TRI.getSubReg(DestReg, MOS::sublo),
+                    TRI.getSubReg(SrcReg, MOS::sublo));
+    copyPhysRegImpl(Builder, TRI.getSubReg(DestReg, MOS::subhi),
+                    TRI.getSubReg(SrcReg, MOS::subhi));
+    copyPhysRegImpl(Builder, TRI.getSubReg(DestReg, MOS::subupper),
+                    TRI.getSubReg(SrcReg, MOS::subupper));
+    copyPhysRegImpl(Builder, TRI.getSubReg(DestReg, MOS::subtop),
+                    TRI.getSubReg(SrcReg, MOS::subtop));
+  } else if (AreClasses(MOS::Imag24RegClass, MOS::Imag16RegClass)) {
+    // Zero-extend 16-bit to 24/32-bit (Bank 0 assumption for stack addresses)
+    assert(SrcReg.isPhysical() && DestReg.isPhysical());
+    copyPhysRegImpl(Builder, TRI.getSubReg(DestReg, MOS::sublo),
+                    TRI.getSubReg(SrcReg, MOS::sublo));
+    copyPhysRegImpl(Builder, TRI.getSubReg(DestReg, MOS::subhi),
+                    TRI.getSubReg(SrcReg, MOS::subhi));
+    
+    // Clear upper bytes
+    Register Zero = createVReg(Builder, MOS::AcRegClass);
+    Builder.buildInstr(MOS::LDImm, {Zero}, {INT64_C(0)});
+    
+    // Explicit addDef/addUse to resolve initializer list ambiguity
+    Builder.buildInstr(MOS::STImag8)
+        .addDef(TRI.getSubReg(DestReg, MOS::subupper))
+        .addUse(Zero);
+    Builder.buildInstr(MOS::STImag8)
+        .addDef(TRI.getSubReg(DestReg, MOS::subtop))
+        .addUse(Zero);
+    
+  } else if (AreClasses(MOS::Imag16RegClass, MOS::Imag24RegClass)) {
+    // Truncate 32-bit to 16-bit
+    assert(SrcReg.isPhysical() && DestReg.isPhysical());
+    copyPhysRegImpl(Builder, TRI.getSubReg(DestReg, MOS::sublo),
+                    TRI.getSubReg(SrcReg, MOS::sublo));
+    copyPhysRegImpl(Builder, TRI.getSubReg(DestReg, MOS::subhi),
+                    TRI.getSubReg(SrcReg, MOS::subhi));
+  // END FIX
   } else if (AreClasses(MOS::Anyi1RegClass, MOS::Anyi1RegClass)) {
+    // ... existing logic ...
     assert(SrcReg.isPhysical() && DestReg.isPhysical());
     Register SrcReg8 =
         TRI.getMatchingSuperReg(SrcReg, MOS::sublsb, &MOS::Anyi8RegClass);
@@ -952,6 +992,41 @@ void MOSInstrInfo::loadStoreRegStackSlot(
                                    MF.getMachineMemOperand(MMO, 1, 1));
       if (IsLoad && Tmp != Reg)
         Builder.buildCopy(Reg, Tmp);
+    } else if ((Reg.isPhysical() && MOS::Imag24RegClass.contains(Reg)) ||
+               (Reg.isVirtual() &&
+                MRI.getRegClass(Reg)->hasSuperClassEq(&MOS::Imag24RegClass))) {
+      // 32-bit (Imag24) split logic for 65816/Large pointers
+      const unsigned SubRegs[] = {MOS::sublo, MOS::subhi, MOS::subupper, MOS::subtop};
+      MachineOperand Ops[4] = {
+          MachineOperand::CreateReg(Reg, IsLoad), MachineOperand::CreateReg(Reg, IsLoad),
+          MachineOperand::CreateReg(Reg, IsLoad), MachineOperand::CreateReg(Reg, IsLoad)
+      };
+      
+      Register Tmp = Reg;
+      // If virtual, use a temporary to attach subregs to avoid VirtRegMap issues
+      if (Reg.isVirtual()) {
+          Tmp = MRI.createVirtualRegister(&MOS::Imag24RegClass);
+      }
+
+      for (int i = 0; i < 4; ++i) {
+          if (Reg.isPhysical()) {
+              Ops[i].setReg(TRI->getSubReg(Reg, SubRegs[i]));
+          } else {
+              Ops[i].setReg(Tmp);
+              Ops[i].setSubReg(SubRegs[i]);
+              if (IsLoad && Ops[i].isDef()) Ops[i].setIsUndef();
+          }
+      }
+
+      if (!IsLoad && Tmp != Reg) Builder.buildCopy(Tmp, Reg);
+
+      for (int i = 0; i < 4; ++i) {
+          loadStoreByteStaticStackSlot(Builder, Ops[i], FrameIndex, i, 
+                                       MF.getMachineMemOperand(MMO, i, 1));
+      }
+
+      if (IsLoad && Tmp != Reg) Builder.buildCopy(Reg, Tmp);
+
     } else {
       loadStoreByteStaticStackSlot(
           Builder, MachineOperand::CreateReg(Reg, IsLoad), FrameIndex, 0, MMO);
@@ -1042,46 +1117,51 @@ bool MOSInstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
 
 
 // 2. Update expandLDImm32 to use the flags
+
 void MOSInstrInfo::expandLDImm32(MachineIRBuilder &Builder) const {
   auto &MI = *Builder.getInsertPt();
-  const TargetRegisterInfo &TRI =
-      *Builder.getMF().getSubtarget().getRegisterInfo();
-
+  const TargetRegisterInfo &TRI = *Builder.getMF().getSubtarget<MOSSubtarget>().getRegisterInfo();
   Register Dst = MI.getOperand(0).getReg();
-  Register Scratch = MI.getOperand(1).getReg();
-  MachineOperand Src = MI.getOperand(2);
+  MachineOperand Src = MI.getOperand(1);
 
-  // Subregisters and shifts for 4 bytes
+  // Use PHA/PLA to save A, as we use it for transfer.
+  Builder.buildInstr(MOS::PHA_Implied);
+  
   const unsigned SubRegs[] = {MOS::sublo, MOS::subhi, MOS::subupper, MOS::subtop};
   const unsigned Shifts[] = {0, 8, 16, 24};
-  const unsigned Flags[] = {MOS::MO_LO, MOS::MO_HI, MOS::MO_UPPER, 0};
+  const unsigned Flags[] = {MOS::MO_LO, MOS::MO_HI, MOS::MO_UPPER};
 
   for (int i = 0; i < 4; ++i) {
-    Register SubReg = TRI.getSubReg(Dst, SubRegs[i]);
-    auto Ld = Builder.buildInstr(MOS::LDImm);
-    Ld.addDef(Scratch);
-
+    Register PhysSubReg = TRI.getSubReg(Dst, SubRegs[i]);
+    
+    // Safety check: skip if subregister doesn't exist (e.g. for 16-bit regs)
+    if (!PhysSubReg) continue;
+    
+    // Emit LDA_Immediate (real instruction)
+    auto Ld = Builder.buildInstr(MOS::LDA_Immediate, {MOS::A}, {});
     if (Src.isImm()) {
       Ld.addImm((Src.getImm() >> Shifts[i]) & 0xFF);
     } else {
-      // For the 4th byte (bits 24-31) of a symbol address:
-      // Since W65816 uses 24-bit pointers, the top byte is always 0.
-      // We must emit immediate 0, otherwise the linker receives the full 
-      // symbol value for an 8-bit field with no modifier, causing overflow.
-      if (i == 3) {
-        Ld.addImm(0);
-      } else {
+      // Handle symbolic offsets
+      if (i < 3) {
         MachineOperand MO = Src;
-        if (Flags[i])
-          MO.setTargetFlags(Flags[i]);
+        MO.setTargetFlags(Flags[i]);
         Ld.add(MO);
+      } else {
+        // For the top byte of a 32-bit register holding a 24-bit pointer,
+        // we zero-extend (load 0).
+        Ld.addImm(0);
       }
     }
-
-    // Copy from scratch GPR to imaginary subregister (STImag8)
-    copyPhysRegImpl(Builder, SubReg, Scratch);
+      
+    // Emit STA_ZeroPage (real instruction). 
+    // We pass PhysSubReg as a Use; MOSMCInstLower converts it to the ZP symbol.
+    Builder.buildInstr(MOS::STA_ZeroPage)
+           .addUse(PhysSubReg)
+           .addUse(MOS::A, RegState::Implicit);
   }
 
+  Builder.buildInstr(MOS::PLA_Implied);
   MI.eraseFromParent();
 }
 //===---------------------------------------------------------------------===//

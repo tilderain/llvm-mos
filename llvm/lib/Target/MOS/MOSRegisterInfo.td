@@ -20,6 +20,18 @@ def sublo : MOSSubRegIndex<8>;
 // High byte of a 16-bit imaginary pointer register.
 def subhi : MOSSubRegIndex<8, 8>;
 
+// Upper byte (bank) of a 32-bit/24-bit register.
+def subupper : MOSSubRegIndex<8, 16>;
+
+// Top byte of a 32-bit register.
+def subtop   : MOSSubRegIndex<8, 24>;
+
+// 16-bit Low word (for future composition or if needed)
+def sublo16  : MOSSubRegIndex<16, 0>;
+
+// 16-bit High word
+def subhi16  : MOSSubRegIndex<16, 16>;
+
 // Carry bit of the 8-bit processor status register.
 def subcarry : MOSSubRegIndex<1>;
 
@@ -125,12 +137,24 @@ class MOSImagReg16<bits<16> num, string name, list<Register> subregs>
   let CoveredBySubRegs = 1;
 }
 
+// 32-bit imaginary registers (consecutive quads of 8-bit registers).
+// Defined using 8-bit subregs only to avoid TableGen ambiguity.
+class MOSImagReg32<bits<16> num, string name, list<Register> subregs8>
+    : MOSReg<num, name> {
+  let SubRegs = subregs8;
+  let SubRegIndices = [sublo, subhi, subupper, subtop];
+  let CoveredBySubRegs = 1;
+}
+
 defvar MaxImag8Regs = 256;
 // The starting DWARF number for the imaginary registers.
 defvar Imag8RegsOffset = 0x10;
 
 defvar MaxImag16Regs = !sra(MaxImag8Regs, 1);
 defvar Imag16RegsOffset = !add(Imag8RegsOffset, !shl(MaxImag8Regs,1));
+
+defvar MaxImag32Regs = !sra(MaxImag8Regs, 2); 
+defvar Imag32RegsOffset = !add(Imag16RegsOffset, !shl(MaxImag16Regs, 1));
 
 // Now we enumerate the imaginary registers.
 // Imaginary 8-bit registers, starting with the prefix rc
@@ -147,6 +171,19 @@ foreach I = 0...!add(MaxImag16Regs, -1) in {
        !cast<Register>("RC"#!add(!shl(I,1),1))]>;
 }
 
+// Imaginary 32-bit registers, starting with the prefix rl
+foreach I = 0...!add(MaxImag32Regs, -1) in {
+  def RL#I: MOSImagReg32<
+      !add(I, Imag32RegsOffset), 
+      "rl"#!cast<string>(I),
+      // 8-bit subregs (RC)
+      [!cast<Register>("RC"#!mul(I, 4)),
+       !cast<Register>("RC"#!add(!mul(I, 4), 1)),
+       !cast<Register>("RC"#!add(!mul(I, 4), 2)),
+       !cast<Register>("RC"#!add(!mul(I, 4), 3))]
+  >;
+}
+
 //===----------------------------------------------------------------------===//
 //  Register classes
 //===----------------------------------------------------------------------===//
@@ -160,6 +197,10 @@ class MOSReg1Class<dag RegList>: MOSRegClass<[i1], 8, RegList> {
 }
 class MOSReg8Class<dag RegList>: MOSRegClass<[i8], 8, RegList>;
 class MOSReg16Class<dag RegList>: MOSRegClass<[i16], 8, RegList>;
+class MOSReg32Class<dag RegList>: MOSRegClass<[i32], 8, RegList> {
+  let RegInfos = RegInfoByHwMode<[DefaultMode], [RegInfo<32, 32, 8>]>;
+}
+
 
 // Single register classes.
 let isPressureFineGrained = true in {
@@ -179,6 +220,8 @@ let isPressureFineGrained = true in {
 }
 def Imag8 : MOSReg8Class<(sequence "RC%u", 0, !add(MaxImag8Regs, -1))>;
 def Imag16 : MOSReg16Class<(sequence "RS%u", 0, !add(MaxImag16Regs, -1))>;
+// Imag24 is actually 32-bit registers (RL) to handle 24-bit pointers via i32
+def Imag24 : MOSReg32Class<(sequence "RL%u", 0, !add(MaxImag32Regs, -1))>;
 
 // Instruction-specific register classes.
 def AImag8 : MOSReg8Class<(add Imag8, A)>;
@@ -210,40 +253,3 @@ let isAllocatable = false in {
   def Fakei32 : MOSRegClass<[i32], 8, (add Fake)>;
   def Fakei64 : MOSRegClass<[i64], 8, (add Fake)>;
 }
-def sublo16 : MOSSubRegIndex<16, 0> {
-  let ComposedOf = [sublo, subhi];
-}
-
-// NEW: Upper 8 bits (bits 16-23)
-def subupper : MOSSubRegIndex<8, 16>;
-// NEW: Top 8 bits (bits 24-31)
-def subtop : MOSSubRegIndex<8, 24>;
-
-// Define 32-bit registers (used for 24-bit pointers + padding)
-// We use 4 subregisters to fully cover the 32-bit value.
-class MOSImagReg32<bits<16> num, string name, list<Register> subregs>
-    : MOSReg<num, name> {
-  let SubRegs = subregs;
-  let SubRegIndices = [sublo, subhi, subupper, subtop]; 
-  let CoveredBySubRegs = 1;
-}
-
-class MOSReg32Class<dag RegList>: MOSRegClass<[i32], 8, RegList> {
-  // 32-bit size, 32-bit spill, 8-bit align
-  let RegInfos = RegInfoByHwMode<[DefaultMode], [RegInfo<32, 32, 8>]>;
-}
-
-// 256 / 4 = 64 registers available
-defvar MaxImag32Regs = 64; 
-defvar Imag32RegsOffset = !add(Imag16RegsOffset, !shl(MaxImag16Regs, 1));
-
-foreach I = 0...!add(MaxImag32Regs, -1) in {
-  def RL#I: MOSImagReg32<!add(I, Imag32RegsOffset), "rl"#!cast<string>(I),
-      [!cast<Register>("RC"#!mul(I, 4)),
-       !cast<Register>("RC"#!add(!mul(I, 4), 1)),
-       !cast<Register>("RC"#!add(!mul(I, 4), 2)),
-       !cast<Register>("RC"#!add(!mul(I, 4), 3))]>;
-}
-
-// Map this class to Imag24 name to allow existing C++ code to find it
-def Imag24 : MOSReg32Class<(sequence "RL%u", 0, !add(MaxImag32Regs, -1))>;

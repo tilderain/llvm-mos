@@ -75,13 +75,16 @@ MOSLegalizerInfo::MOSLegalizerInfo(const MOSSubtarget &STI) {
 
   // Constants
   getActionDefinitionsBuilder(G_CONSTANT)
-      .legalFor({S1, S8, S16, S32, S64, P, PZ, LLT::pointer(0, 16), LLT::pointer(0, 32)})
+      .legalFor({S1, S8, S16, S32, P, PZ, LLT::pointer(0, 16), LLT::pointer(0, 32)})
       .widenScalarToNextMultipleOf(0, 8)
+      // FIX: Force S64 constants to be narrowed to S32 immediately.
+      .maxScalar(0, S32)
       .unsupported();
 
   getActionDefinitionsBuilder(G_IMPLICIT_DEF)
-      .legalFor({S1, S8, S16, S32, S64, P, PZ, LLT::pointer(0, 16), LLT::pointer(0, 32)})
+      .legalFor({S1, S8, S16, S32, P, PZ, LLT::pointer(0, 16), LLT::pointer(0, 32)})
       .widenScalarToNextMultipleOf(0, 8)
+      .maxScalar(0, S32)
       .unsupported();
 
 
@@ -160,9 +163,15 @@ getActionDefinitionsBuilder(G_TRUNC)
 
   // Integer Operations
 
+
   getActionDefinitionsBuilder({G_ADD, G_SUB})
       .legalFor({S8})
+      // FIX: Use customFor instead of legalFor.
+      // This forces 16-bit and 32-bit math to go to our custom handler
+      // where they will be narrowed to 8-bit chunks.
+      .customFor({S16, S32})
       .widenScalarToNextMultipleOf(0, 8)
+      .clampScalar(0, S8, S32)
       .custom();
 
   getActionDefinitionsBuilder({G_AND, G_OR})
@@ -357,12 +366,13 @@ getActionDefinitionsBuilder({G_LOAD, G_STORE})
       .custom();
 
   // Control Flow
-  getActionDefinitionsBuilder(G_PHI)
-      // FIX: Added S64 support to prevent legalization failures during 64-bit 
-      // libcall generation (like __udivdi3).
-      .legalFor({S1, S8, S16, S32, S64, P, PZ, LLT::pointer(0, 16), LLT::pointer(0, 32)})
-      .unsupported();
 
+  getActionDefinitionsBuilder(G_PHI)
+      .legalFor({S1, S8, S16, S32, P, PZ, LLT::pointer(0, 16), LLT::pointer(0, 32)})
+      // FIX: PHI nodes must NEVER be 64-bit. This forces the legalizer to
+      // split 64-bit loop variables into two 32-bit PHI nodes.
+      .clampScalar(0, S1, S32)
+      .unsupported();
 
   getActionDefinitionsBuilder(G_BRCOND).customFor({S1}).unsupported();
 
@@ -385,11 +395,10 @@ getActionDefinitionsBuilder({G_LOAD, G_STORE})
 
   getActionDefinitionsBuilder({G_STACKSAVE, G_STACKRESTORE}).lower();
 
-getActionDefinitionsBuilder(G_FREEZE)
-      // FIX: Changed from .legalFor to .customFor
-      // This ensures G_FREEZE is always lowered to a COPY via legalizeCustom
-      .customFor({S1, S8, S16, S32, S64, P, PZ, LLT::pointer(0, 16), LLT::pointer(0, 32)})
+  getActionDefinitionsBuilder(G_FREEZE)
+      .customFor({S1, S8, S16, S32, P, PZ, LLT::pointer(0, 16), LLT::pointer(0, 32)})
       .widenScalarToNextMultipleOf(0, 8)
+      .maxScalar(0, S32)
       .unsupported();
 
   getLegacyLegalizerInfo().computeTables();
@@ -835,8 +844,13 @@ bool MOSLegalizerInfo::legalizeAddSub(LegalizerHelper &Helper,
   auto &Builder = Helper.MIRBuilder;
   LLT S8 = LLT::scalar(8);
 
-  auto [Dst, Src] = MI.getFirst2Regs();
+  auto [Dst, DstTy, Src, SrcTy] = MI.getFirst2RegLLTs();
   assert(MRI.getType(Dst).isByteSized());
+
+
+  if (DstTy == LLT::scalar(16) || DstTy == LLT::scalar(32)) {
+    return Helper.narrowScalarAddSub(MI, 0, S8) != LegalizerHelper::UnableToLegalize;
+  }
 
   auto RHSConst =
       getIConstantVRegValWithLookThrough(MI.getOperand(2).getReg(), MRI);
@@ -1652,13 +1666,6 @@ bool MOSLegalizerInfo::legalizePtrAdd(LegalizerHelper &Helper,
         .addDef(Result)
         .addGlobalAddress(Op.getGlobal(),
                           Op.getOffset() + ConstOffset->Value.getSExtValue());
-    MI.eraseFromParent();
-    return true;
-  }
-
-  if (ConstOffset && ConstOffset->Value.abs().isOne()) {
-    Builder.buildInstr(ConstOffset->Value.isOne() ? MOS::G_INC : MOS::G_DEC,
-                       {Result}, {Base});
     MI.eraseFromParent();
     return true;
   }

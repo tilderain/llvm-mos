@@ -47,35 +47,40 @@ using namespace llvm;
 MOSRegisterInfo::MOSRegisterInfo()
     : MOSGenRegisterInfo(/*RA=*/0, /*DwarfFlavor=*/0, /*EHFlavor=*/0,
                          /*PC=*/0, /*HwMode=*/0),
-      Imag8SymbolNames(new std::string[getNumRegs()]), Reserved(getNumRegs()) {
+      // Use getNumRegs() to ensure we cover RL0-RL63
+      Imag8SymbolNames(new std::string[getNumRegs()]), 
+      Reserved(getNumRegs()) {
+
   for (unsigned Reg : seq(0u, getNumRegs())) {
     unsigned R = Reg;
-    if (MOS::Imag16RegClass.contains(R))
+    // If it's 32-bit or 16-bit, get the 8-bit base for the symbol name
+    if (MOS::Imag24RegClass.contains(R))
       R = getSubReg(R, MOS::sublo);
-    // CRITICAL: Handle Imag24/Imag32 (whatever you named the class in RegisterInfo.td)
-    else if (MOS::Imag24RegClass.contains(R)) // Check this name matches your TD!
+    else if (MOS::Imag16RegClass.contains(R))
       R = getSubReg(R, MOS::sublo);
       
     if (!MOS::Imag8RegClass.contains(R))
       continue;
+      
+    // __rc0, __rc1, etc.
     std::string &Str = Imag8SymbolNames[Reg];
     Str = "__";
     Str += getName(R);
     std::transform(Str.begin(), Str.end(), Str.begin(), ::tolower);
   }
 
-  // Reserve all imaginary registers beyond the number allowed to the compiler.
- for (Register Ptr : enum_seq_inclusive(MOS::RS16, MOS::RS127))
-    reserveAllSubregs(&Reserved, Ptr);
-  
-  // Update for 4-byte registers (RL16 to RL63)
-  for (Register Ptr : enum_seq_inclusive(MOS::RL16, MOS::RL63))
-    reserveAllSubregs(&Reserved, Ptr);
-  // Reserve stack pointers.
-  reserveAllSubregs(&Reserved, MOS::RS0);
 
-  // Reserve one temporary register for use by register scavenger.
-  reserveAllSubregs(&Reserved, MOS::RS8);
+for (unsigned R : seq_inclusive((unsigned)MOS::RS16, (unsigned)MOS::RS127))
+  reserveAllSubregs(&Reserved, Register(R));
+
+// Reserve RL8 and above to maintain consistency with RS reservation
+// (RL0-7 cover RS0-15)
+for (unsigned R : seq_inclusive((unsigned)MOS::RL8, (unsigned)MOS::RL63))
+  reserveAllSubregs(&Reserved, Register(R));
+
+  // 3. System registers
+  reserveAllSubregs(&Reserved, MOS::RS0); // Stack pointer
+  reserveAllSubregs(&Reserved, MOS::RS8); // Scavenger scratch
 }
 
 const MCPhysReg *
@@ -951,27 +956,31 @@ MOSInstrCost MOSRegisterInfo::copyCost(Register DestReg, Register SrcReg,
     return XYCopyCost;
   }
   if (AreClasses(MOS::Imag8RegClass, MOS::GPRRegClass)) {
-    // STImag8
     return MOSInstrCost(2, (STI.hasHUC6280() || STI.hasSPC700()) ? 4 : 3);
   }
   if (AreClasses(MOS::GPRRegClass, MOS::Imag8RegClass)) {
-    // LDImag8
     return MOSInstrCost(2, (STI.hasHUC6280() || STI.hasSPC700()) ? 4 : 3);
   }
   if (AreClasses(MOS::Imag8RegClass, MOS::Imag8RegClass)) {
-    // MOV dp, dp
     if (STI.hasSPC700())
       return MOSInstrCost(3, 5);
-    // May need to PHA/PLA around.
     return (PushCost + PopCost) / 2 + copyCost(DestReg, MOS::A, STI) +
            copyCost(MOS::A, SrcReg, STI);
   }
   if (AreClasses(MOS::Imag16RegClass, MOS::Imag16RegClass)) {
     return copyCost(MOS::RC0, MOS::RC1, STI) * 2;
   }
+  // START FIX
   if (AreClasses(MOS::Imag24RegClass, MOS::Imag24RegClass)) {
-    return copyCost(MOS::RC0, MOS::RC1, STI) * 3;
+    return copyCost(MOS::RC0, MOS::RC1, STI) * 4;
   }
+  if (AreClasses(MOS::Imag24RegClass, MOS::Imag16RegClass)) {
+    return copyCost(MOS::RC0, MOS::RC1, STI) * 2 + MOSInstrCost(4, 4);
+  }
+  if (AreClasses(MOS::Imag16RegClass, MOS::Imag24RegClass)) {
+    return copyCost(MOS::RC0, MOS::RC1, STI) * 2;
+  }
+  // END FIX
   if (AreClasses(MOS::Anyi1RegClass, MOS::Anyi1RegClass)) {
     Register SrcReg8 =
         getMatchingSuperReg(SrcReg, MOS::sublsb, &MOS::Anyi8RegClass);

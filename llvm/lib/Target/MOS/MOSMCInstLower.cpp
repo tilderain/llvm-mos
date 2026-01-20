@@ -499,29 +499,20 @@ case MOS::LDImm:
     OutMI.addOperand(Val);
     return;
   }
+
   case MOS::LDAZpIdx:
   case MOS::LDAAbsIdx: {
-    bool MustZP = MI->getOpcode() == MOS::LDAZpIdx;
-    bool ZP = MustZP || canUseZeroPageIdx(MI->getOperand(1));
-    bool ImmConfusable = false;
-    switch (MI->getOperand(2).getReg()) {
-    default:
-      llvm_unreachable("Unexpected LDAAbsIdx register.");
-    case MOS::X:
-      OutMI.setOpcode(ZP ? MOS::LDA_ZeroPageX : MOS::LDA_AbsoluteX);
-      ImmConfusable = !ZP;
-      break;
-    case MOS::Y:
-      if (MustZP)
-        llvm_unreachable("Unexpected register.");
-      OutMI.setOpcode(MOS::LDA_AbsoluteY);
-      break;
-    }
+    const MachineOperand &AddrOp = MI->getOperand(1);
+    bool ForceZP = (MI->getOpcode() == MOS::LDAZpIdx) || (AddrOp.getTargetFlags() == MOS::MO_ZEROPAGE);
+    Register IdxReg = MI->getOperand(2).getReg();
+
+    if (IdxReg == MOS::X) 
+        OutMI.setOpcode(ForceZP ? MOS::LDA_ZeroPageX : MOS::LDA_AbsoluteXLong);
+    else 
+        OutMI.setOpcode(MOS::LDA_AbsoluteY); // No 'Long, Y' on 65816
+
     MCOperand Val;
-    if (!lowerOperand(MI->getOperand(1), Val))
-      llvm_unreachable("Failed to lower operand");
-    if (ImmConfusable)
-      Val = wrapAbsoluteIdxBase(MI, Val, Ctx);
+    if (!lowerOperand(AddrOp, Val)) return;
     OutMI.addOperand(Val);
     return;
   }
@@ -688,25 +679,45 @@ case MOS::LDImm:
     }
     llvm_unreachable("Unexpected register.");
   }
+  case MOS::JSR: {
+    // FIX: Map logical JSR to W65816 JSL (Jump Subroutine Long) for 24-bit calls.
+    // Opcode $22 vs $20.
+    OutMI.setOpcode(STI.hasW65816() ? MOS::JSL_AbsoluteLong : MOS::JSR_Absolute);
+    MCOperand Tgt;
+    if (!lowerOperand(MI->getOperand(0), Tgt))
+      llvm_unreachable("Failed to lower JSR target");
+    OutMI.addOperand(Tgt);
+    return;
+  }
+
+  case MOS::RTS: {
+    // FIX: Map logical RTS to W65816 RTL (Return Long) to match JSL.
+    // Opcode $6B vs $60.
+    OutMI.setOpcode(STI.hasW65816() ? MOS::RTL_Implied : MOS::RTS_Implied);
+    return;
+  }
+    case MOS::TailJMP: {
+    // FIX: Map TailJMP to JML (Jump Long) on W65816 for 24-bit tail calls.
+    OutMI.setOpcode(STI.hasW65816() ? MOS::JMP_AbsoluteLong : MOS::JMP_Absolute);
+    MCOperand Tgt;
+    if (!lowerOperand(MI->getOperand(0), Tgt))
+      llvm_unreachable("Failed to lower TailJMP target");
+    OutMI.addOperand(Tgt);
+    return;
+  }
   case MOS::STZpIdx:
   case MOS::STAbsIdx: {
-    bool MustZP = MI->getOpcode() == MOS::STZpIdx;
-    bool ZP = MustZP || canUseZeroPageIdx(MI->getOperand(0));
-    switch (MI->getOperand(2).getReg()) {
-    default:
-      llvm_unreachable("Unexpected register.");
-    case MOS::X:
-      OutMI.setOpcode(ZP ? MOS::STA_ZeroPageX : MOS::STA_AbsoluteX);
-      break;
-    case MOS::Y:
-      if (MustZP)
-        llvm_unreachable("Unexpected register.");
-      OutMI.setOpcode(MOS::STA_AbsoluteY);
-      break;
-    }
+    const MachineOperand &AddrOp = MI->getOperand(1);
+    bool ForceZP = (MI->getOpcode() == MOS::STZpIdx) || (AddrOp.getTargetFlags() == MOS::MO_ZEROPAGE);
+    Register IdxReg = MI->getOperand(2).getReg();
+
+    if (IdxReg == MOS::X) 
+        OutMI.setOpcode(ForceZP ? MOS::STA_ZeroPageX : MOS::STA_AbsoluteXLong);
+    else 
+        OutMI.setOpcode(MOS::STA_AbsoluteY);
+
     MCOperand Val;
-    if (!lowerOperand(MI->getOperand(1), Val))
-      llvm_unreachable("Failed to lower operand");
+    if (!lowerOperand(AddrOp, Val)) return;
     OutMI.addOperand(Val);
     return;
   }

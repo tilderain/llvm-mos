@@ -1007,28 +1007,26 @@ bool MOSInstructionSelector::selectBrCondImm(MachineInstr &MI) {
 
     if (STI.hasW65816() && SrcTy.getSizeInBits() == 32) {
         LLT S8 = LLT::scalar(8);
-        
-        // Split the 32-bit register into bytes
-        auto Unmerge = Builder.buildUnmerge(S8, CmpSrc);
-        Register B0 = Unmerge.getReg(0); // Low
-        Register B1 = Unmerge.getReg(1); // Mid
-        Register B2 = Unmerge.getReg(2); // High
-        // B3 is padding, ignore it.
-
-        // OR the bytes together. (B0 | B1 | B2) is zero ONLY if all bytes are zero.
-        auto Or1 = Builder.buildOr(S8, B0, B1);
-        auto Or2 = Builder.buildOr(S8, Or1, B2);
-        
-        constrainSelectedInstRegOperands(*Or1, TII, TRI, RBI);
-        constrainSelectedInstRegOperands(*Or2, TII, TRI, RBI);
-
-        // Emit a standard 8-bit Compare-Branch-Zero on the result.
-        // This effectively branches if the 24-bit pointer is NULL (or not NULL).
+        // Use target-specific ORA instead of G_OR
+        // We manually extract the 8-bit parts using subregs
+        Register B0 = MRI.createVirtualRegister(&MOS::Anyi8RegClass);
+        Register B1 = MRI.createVirtualRegister(&MOS::Anyi8RegClass);
+        Register B2 = MRI.createVirtualRegister(&MOS::Anyi8RegClass);
+    
+        auto C0 = Builder.buildCopy(B0, CmpSrc); C0->getOperand(1).setSubReg(MOS::sublo);
+        auto C1 = Builder.buildCopy(B1, CmpSrc); C1->getOperand(1).setSubReg(MOS::subhi);
+        auto C2 = Builder.buildCopy(B2, CmpSrc); C2->getOperand(1).setSubReg(MOS::subupper);
+    
+        Register Tmp = MRI.createVirtualRegister(&MOS::AcRegClass);
+        // Combine bytes using target ORA instructions
+        Builder.buildInstr(MOS::ORAImag8, {&MOS::AcRegClass}, {B0, B1});
+        Builder.buildInstr(MOS::ORAImag8, {Tmp}, {Tmp, B2});
+    
         auto CmpBr = Builder.buildInstr(MOS::CmpBrZero)
             .addMBB(Tgt)
             .addUse(MOS::Z, RegState::Undef)
             .addImm(FlagVal)
-            .addUse(Or2.getReg(0));
+            .addUse(Tmp);
             
         constrainSelectedInstRegOperands(*CmpBr, TII, TRI, RBI);
         MI.eraseFromParent();
@@ -1367,25 +1365,14 @@ bool MOSInstructionSelector::selectAddr(MachineInstr &MI) {
   Register Dst = MI.getOperand(0).getReg();
   LLT Ty = Builder.getMRI()->getType(Dst);
 
-  if (Ty.getSizeInBits() == 32) {
-    Register Scratch = Builder.getMRI()->createVirtualRegister(&MOS::GPRRegClass);
-    
-    // If Dst is a pointer (p0), we need to handle it carefully.
-    // LDImm32 produces an Imag24 value (i32).
-    // We create a temporary i32 register, load into it, and then update Dst.
-    // Note: Since we are in InstructionSelect, types are less strict, but register classes matter.
-    // Dst needs to be constrained to Imag24.
-    
-    // Simplest approach: Use LDImm32 directly on Dst.
-    // The previous error was unrelated to this specific instruction, but to G_STORE_INDIR.
-    // However, ensuring Dst is treated as compatible with Imag24 is good practice.
-    
-    auto Instr = Builder.buildInstr(MOS::LDImm32, {Dst, Scratch}, {}).add(Op);
-    if (!constrainSelectedInstRegOperands(*Instr, TII, TRI, RBI))
-      return false;
-    MI.eraseFromParent();
-    return true;
-  }
+if (Ty.getSizeInBits() == 32) {
+  // FIX: Build LDImm32 with ONLY the destination register.
+  auto Instr = Builder.buildInstr(MOS::LDImm32, {Dst}, {}).add(Op);
+  if (!constrainSelectedInstRegOperands(*Instr, TII, TRI, RBI))
+    return false;
+  MI.eraseFromParent();
+  return true;
+}
 
   MachineInstrBuilder Instr = buildLdImm(Builder, Dst).add(Op);
   if (!constrainSelectedInstRegOperands(*Instr, TII, TRI, RBI))
@@ -1770,6 +1757,9 @@ bool MOSInstructionSelector::selectMergeValues(MachineInstr &MI) {
   Register Dst = MI.getOperand(0).getReg();
   LLT Ty = MRI.getType(Dst);
 
+  if (Ty.getSizeInBits() == 64) {
+      return false; // Let legalizer handle splitting this
+  }
   // Handle 32-bit merge
   if (Ty.getSizeInBits() == 32) {
     Register Lo = MI.getOperand(1).getReg();
@@ -2045,6 +2035,16 @@ bool MOSInstructionSelector::selectUnMergeValues(MachineInstr &MI) {
   LLT Ty = Builder.getMRI()->getType(Src);
   LLT DstTy = Builder.getMRI()->getType(MI.getOperand(0).getReg());
 
+
+  if (Ty.getSizeInBits() == 64) {
+    for (unsigned i = 0; i < MI.getNumDefs(); ++i) {
+      Register Dst = MI.getOperand(i).getReg();
+      auto Copy = Builder.buildCopy(Dst, Src);
+      constrainGenericOp(*Copy);
+    }
+    MI.eraseFromParent();
+    return true;
+  }
   // Handle 32-bit unmerge to 8-bit parts
   if (Ty.getSizeInBits() == 32 && DstTy.getSizeInBits() == 8) {
     Register Lo = MI.getOperand(0).getReg();
