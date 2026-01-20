@@ -322,9 +322,8 @@ def JMPIdxIndir : MOSUnconditionalBranch, PseudoInstExpansion<(JMP_IndexedIndire
   let isIndirectBranch = true;
 }
 
-def JSR : MOSLogicalInstr, PseudoInstExpansion<(JSR_Absolute addr16:$tgt)> {
+def JSR : MOSLogicalInstr {
   dag InOperandList = (ins label:$tgt);
-
   let isCall = true;
 }
 
