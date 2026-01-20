@@ -55,22 +55,20 @@
 //===----------------------------------------------------------------------===//
 
 let Entry = 1 in {
+
 def CC_MOS : CallingConv<[
   CCIfType<[i1], CCPromoteToType<i8>>,
 
-  // Pointers are preferentially assigned to imaginary registers so indirect
-  // addressing modes work without additional copying.
-  //
-  // RS0 is skipped since it's the stack pointer.
-  CCIfPtr<CCAssignToReg<[RS1, RS2, RS3, RS4, RS5, RS6, RS7]>>,
+  // Handle 24-bit (32-bit LLVM) pointers for 65816
+  CCIfPtr<CCIfType<[i32], CCAssignToReg<[RL1, RL2, RL3, RL4, RL5, RL6]>>>,
+  
+  // Handle 16-bit pointers (Near/6502)
+  CCIfPtr<CCIfType<[i16], CCAssignToReg<[RS1, RS2, RS3, RS4, RS5, RS6, RS7]>>>,
 
-  // 8-bit values are assigned to A, then X, then the argument imaginary registers.
   CCIfType<[i8], CCAssignToReg<[
-    A, X, RC2, RC3, RC4, RC5, RC6, RC7, RC8, RC9, RC10, RC11, RC12, RC13, RC14,
-    RC15
+    A, X, RC2, RC3, RC4, RC5, RC6, RC7, RC8, RC9, RC10, RC11, RC12, RC13, RC14, RC15
   ]>>,
 
-  // Values that wouldn't fit anywhere else are passed directly on the stack.
   CCAssignToStack<0, 1>,
 ]>;
 

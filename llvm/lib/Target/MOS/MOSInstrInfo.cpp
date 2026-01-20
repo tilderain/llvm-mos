@@ -104,8 +104,8 @@ void MOSInstrInfo::reMaterialize(MachineBasicBlock &MBB,
     
     if (SubIdx == MOS::sublo) ByteVal = Imm & 0xFF;
     else if (SubIdx == MOS::subhi) ByteVal = (Imm >> 8) & 0xFF;
-    else if (SubIdx == MOS::subupper) ByteVal = (Imm >> 16) & 0xFF;
-    else if (SubIdx == MOS::subtop) ByteVal = (Imm >> 24) & 0xFF;
+    else if (SubIdx == MOS::subbank) ByteVal = (Imm >> 16) & 0xFF;
+    else if (SubIdx == MOS::subpad) ByteVal = (Imm >> 24) & 0xFF;
     else llvm_unreachable("Unexpected subreg index for LDImm32 remat");
 
     MachineInstr *MI = MBB.getParent()->CloneMachineInstr(&Orig);
@@ -232,6 +232,23 @@ unsigned MOSInstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
   case MOS::INLINEASM:
   case MOS::INLINEASM_BR:
     return getInlineAsmLength(MI.getOperand(0).getSymbolName(), MCAI, STI);
+  
+  case MOS::LDImm32:
+    // PHA (1) + 4x(LDA #imm (2) + STA zp (2)) + PLA (1) = 18 bytes
+    return 18;
+  case MOS::LDIndirLong:
+  case MOS::STIndirLong:
+    // Opcode + 3-byte address = 4 bytes
+    return 4;
+  case MOS::LDIndirLongIdx:
+  case MOS::STIndirLongIdx:
+    // Opcode + 3-byte address + index = 4 bytes (The index is implied/reg)
+    return 4;
+  case MOS::JML_Indirect16:
+    return 3; 
+  case MOS::LDAbsLong:
+  case MOS::STAbsLong:
+    return 4;
   }
 }
 
@@ -687,10 +704,10 @@ void MOSInstrInfo::copyPhysRegImpl(MachineIRBuilder &Builder, Register DestReg,
                     TRI.getSubReg(SrcReg, MOS::sublo));
     copyPhysRegImpl(Builder, TRI.getSubReg(DestReg, MOS::subhi),
                     TRI.getSubReg(SrcReg, MOS::subhi));
-    copyPhysRegImpl(Builder, TRI.getSubReg(DestReg, MOS::subupper),
-                    TRI.getSubReg(SrcReg, MOS::subupper));
-    copyPhysRegImpl(Builder, TRI.getSubReg(DestReg, MOS::subtop),
-                    TRI.getSubReg(SrcReg, MOS::subtop));
+    copyPhysRegImpl(Builder, TRI.getSubReg(DestReg, MOS::subbank),
+                    TRI.getSubReg(SrcReg, MOS::subbank));
+    copyPhysRegImpl(Builder, TRI.getSubReg(DestReg, MOS::subpad),
+                    TRI.getSubReg(SrcReg, MOS::subpad));
   } else if (AreClasses(MOS::Imag24RegClass, MOS::Imag16RegClass)) {
     // Zero-extend 16-bit to 24/32-bit (Bank 0 assumption for stack addresses)
     assert(SrcReg.isPhysical() && DestReg.isPhysical());
@@ -705,10 +722,10 @@ void MOSInstrInfo::copyPhysRegImpl(MachineIRBuilder &Builder, Register DestReg,
     
     // Explicit addDef/addUse to resolve initializer list ambiguity
     Builder.buildInstr(MOS::STImag8)
-        .addDef(TRI.getSubReg(DestReg, MOS::subupper))
+        .addDef(TRI.getSubReg(DestReg, MOS::subbank))
         .addUse(Zero);
     Builder.buildInstr(MOS::STImag8)
-        .addDef(TRI.getSubReg(DestReg, MOS::subtop))
+        .addDef(TRI.getSubReg(DestReg, MOS::subpad))
         .addUse(Zero);
     
   } else if (AreClasses(MOS::Imag16RegClass, MOS::Imag24RegClass)) {
@@ -1000,10 +1017,13 @@ void MOSInstrInfo::loadStoreRegStackSlot(
                (Reg.isVirtual() &&
                 MRI.getRegClass(Reg)->hasSuperClassEq(&MOS::Imag24RegClass))) {
       // FIX: 32-bit (Imag24) split logic
-      const unsigned SubRegs[] = {MOS::sublo, MOS::subhi, MOS::subupper, MOS::subtop};
-      MachineOperand Ops[4] = {
-          MachineOperand::CreateReg(Reg, IsLoad), MachineOperand::CreateReg(Reg, IsLoad),
-          MachineOperand::CreateReg(Reg, IsLoad), MachineOperand::CreateReg(Reg, IsLoad)
+
+      // FIX: Only 3 bytes exist for the 24-bit pointer
+      const unsigned SubRegs[] = {MOS::sublo, MOS::subhi, MOS::subbank};
+      MachineOperand Ops[3] = {
+          MachineOperand::CreateReg(Reg, IsLoad), 
+          MachineOperand::CreateReg(Reg, IsLoad),
+          MachineOperand::CreateReg(Reg, IsLoad)
       };
       
       Register Tmp = Reg;
@@ -1011,7 +1031,7 @@ void MOSInstrInfo::loadStoreRegStackSlot(
           Tmp = MRI.createVirtualRegister(&MOS::Imag24RegClass);
       }
 
-      for (int i = 0; i < 4; ++i) {
+      for (int i = 0; i < 3; ++i) { // Only 3 iterations
           if (Reg.isPhysical()) {
               Ops[i].setReg(TRI->getSubReg(Reg, SubRegs[i]));
           } else {
@@ -1023,7 +1043,7 @@ void MOSInstrInfo::loadStoreRegStackSlot(
 
       if (!IsLoad && Tmp != Reg) Builder.buildCopy(Tmp, Reg);
 
-      for (int i = 0; i < 4; ++i) {
+      for (int i = 0; i < 3; ++i) {
           loadStoreByteStaticStackSlot(Builder, Ops[i], FrameIndex, i, 
                                        MF.getMachineMemOperand(MMO, i, 1));
       }
@@ -1142,35 +1162,37 @@ void MOSInstrInfo::expandLDImm32(MachineIRBuilder &Builder) const {
   // Use PHA/PLA to save A, as we use it for transfer.
   Builder.buildInstr(MOS::PHA_Implied);
   
-  const unsigned SubRegs[] = {MOS::sublo, MOS::subhi, MOS::subupper, MOS::subtop};
+  const unsigned SubRegs[] = {MOS::sublo, MOS::subhi, MOS::subbank, MOS::subpad};
   const unsigned Shifts[] = {0, 8, 16, 24};
   const unsigned Flags[] = {MOS::MO_LO, MOS::MO_HI, MOS::MO_UPPER};
+
+
 
   for (int i = 0; i < 4; ++i) {
     Register PhysSubReg = TRI.getSubReg(Dst, SubRegs[i]);
     
-    // Safety check: skip if subregister doesn't exist (e.g. for 16-bit regs)
-    if (!PhysSubReg) continue;
-    
-    // Emit LDA_Immediate (real instruction)
+    // CRASH PREVENTION: If TableGen mapping is wrong, stop here 
+    // instead of emitting $noreg.
+    if (!PhysSubReg) {
+        // Corrected concatenation using Twine
+        report_fatal_error(Twine("Register ") + TRI.getName(Dst) + 
+                           " has no subreg at index " + Twine(i));
+    }
+
     auto Ld = Builder.buildInstr(MOS::LDA_Immediate, {MOS::A}, {});
     if (Src.isImm()) {
-      Ld.addImm((Src.getImm() >> Shifts[i]) & 0xFF);
+      // Byte 3 (padding) is always 0
+      Ld.addImm((i < 3) ? (Src.getImm() >> Shifts[i]) & 0xFF : 0);
     } else {
-      // Handle symbolic offsets
       if (i < 3) {
         MachineOperand MO = Src;
         MO.setTargetFlags(Flags[i]);
         Ld.add(MO);
       } else {
-        // For the top byte of a 32-bit register holding a 24-bit pointer,
-        // we zero-extend (load 0).
-        Ld.addImm(0);
+        Ld.addImm(0); // Zero out the padding byte for symbolic addresses
       }
     }
-      
-    // Emit STA_ZeroPage (real instruction). 
-    // We pass PhysSubReg as a Use; MOSMCInstLower converts it to the ZP symbol.
+    
     Builder.buildInstr(MOS::STA_ZeroPage)
            .addUse(PhysSubReg)
            .addUse(MOS::A, RegState::Implicit);

@@ -1445,10 +1445,10 @@ bool MOSLegalizerInfo::legalizeICmp(LegalizerHelper &Helper,
         auto LHSInt = Builder.buildPtrToInt(S, LHS);
         auto RHSInt = Builder.buildPtrToInt(S, RHS);
         
-        auto Mask = Builder.buildConstant(S, 0x00FFFFFF);
-        
-        auto LHSMasked = Builder.buildAnd(S, LHSInt, Mask);
-        auto RHSMasked = Builder.buildAnd(S, RHSInt, Mask);
+
+    auto Mask = Builder.buildConstant(S, 0x00FFFFFF);
+    auto LHSMasked = Builder.buildAnd(S, Builder.buildPtrToInt(S, LHS), Mask);
+    auto RHSMasked = Builder.buildAnd(S, Builder.buildPtrToInt(S, RHS), Mask);
 
         Helper.Observer.changingInstr(MI);
         MI.getOperand(2).setReg(LHSMasked.getReg(0));
@@ -1658,6 +1658,28 @@ bool MOSLegalizerInfo::legalizePtrAdd(LegalizerHelper &Helper,
 
   MachineInstr *GlobalBase = getOpcodeDef(G_GLOBAL_VALUE, Base, MRI);
   auto ConstOffset = getIConstantVRegValWithLookThrough(Offset, MRI);
+
+  LLT Ty = MRI.getType(Base);
+
+
+
+
+  if (Ty.getSizeInBits() == 32) {
+    LLT S32 = LLT::scalar(32);
+    auto BaseInt = Builder.buildPtrToInt(S32, Base);
+    // Ensure the offset is also 32-bit for the add
+    auto OffExt = Builder.buildSExtOrTrunc(S32, Offset);
+    auto Add = Builder.buildAdd(S32, BaseInt, OffExt);
+    
+    // THE CRITICAL FIX: Mask to 24-bit.
+    // This creates a "monolithic" dependency on all 3 bytes.
+    auto Mask = Builder.buildConstant(S32, 0x00FFFFFF);
+    auto Masked = Builder.buildAnd(S32, Add, Mask);
+    
+    Builder.buildIntToPtr(Result, Masked);
+    MI.eraseFromParent();
+    return true;
+  }
 
   // Fold constant offsets into global value operand.
   if (GlobalBase && ConstOffset) {

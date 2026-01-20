@@ -976,6 +976,9 @@ bool MOSMCInstLower::lowerOperand(const MachineOperand &MO, MCOperand &MCOp) {
       return false;
     Register Reg = MO.getReg();
 
+  if (MO.getSubReg()) {
+    Reg = TRI.getSubReg(Reg, MO.getSubReg());
+  }
     // Some CSRs may have been "spilled" by silently renaming them to zero page
     // locations on the zero page stack. We want to maintain the illusion that
     // these are imaginary registers, so they are rewritten as late as possible.
@@ -993,13 +996,18 @@ bool MOSMCInstLower::lowerOperand(const MachineOperand &MO, MCOperand &MCOp) {
       break;
     }
 
+
+
+    if (Reg == 0) return false; 
+
     if (MOS::Imag16RegClass.contains(Reg) || MOS::Imag8RegClass.contains(Reg) ||
         MOS::Imag24RegClass.contains(Reg)) {
-      const MCExpr *Expr = MCSymbolRefExpr::create(
-          Ctx.getOrCreateSymbol(TRI.getImag8SymbolName(Reg)), Ctx);
-      MCOp = MCOperand::createExpr(Expr);
-    } else
-      MCOp = MCOperand::createReg(MO.getReg());
+    // This will now use RC2 instead of RL0 for the 'upper' byte
+    const MCExpr *Expr = MCSymbolRefExpr::create(
+        Ctx.getOrCreateSymbol(TRI.getImag8SymbolName(Reg)), Ctx);
+    MCOp = MCOperand::createExpr(Expr);
+  } else 
+      MCOp = MCOperand::createReg(Reg);
     break;
   }
   return true;

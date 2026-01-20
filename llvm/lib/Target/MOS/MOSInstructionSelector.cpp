@@ -1005,33 +1005,31 @@ bool MOSInstructionSelector::selectBrCondImm(MachineInstr &MI) {
     Register CmpSrc = CMPZ->getOperand(1).getReg();
     LLT SrcTy = MRI.getType(CmpSrc);
 
-    if (STI.hasW65816() && SrcTy.getSizeInBits() == 32) {
-        LLT S8 = LLT::scalar(8);
-        // Use target-specific ORA instead of G_OR
-        // We manually extract the 8-bit parts using subregs
-        Register B0 = MRI.createVirtualRegister(&MOS::Anyi8RegClass);
-        Register B1 = MRI.createVirtualRegister(&MOS::Anyi8RegClass);
-        Register B2 = MRI.createVirtualRegister(&MOS::Anyi8RegClass);
-    
-        auto C0 = Builder.buildCopy(B0, CmpSrc); C0->getOperand(1).setSubReg(MOS::sublo);
-        auto C1 = Builder.buildCopy(B1, CmpSrc); C1->getOperand(1).setSubReg(MOS::subhi);
-        auto C2 = Builder.buildCopy(B2, CmpSrc); C2->getOperand(1).setSubReg(MOS::subupper);
-    
-        Register Tmp = MRI.createVirtualRegister(&MOS::AcRegClass);
-        // Combine bytes using target ORA instructions
-        Builder.buildInstr(MOS::ORAImag8, {&MOS::AcRegClass}, {B0, B1});
-        Builder.buildInstr(MOS::ORAImag8, {Tmp}, {Tmp, B2});
-    
-        auto CmpBr = Builder.buildInstr(MOS::CmpBrZero)
-            .addMBB(Tgt)
-            .addUse(MOS::Z, RegState::Undef)
-            .addImm(FlagVal)
-            .addUse(Tmp);
-            
-        constrainSelectedInstRegOperands(*CmpBr, TII, TRI, RBI);
-        MI.eraseFromParent();
-        return true;
-    }
+
+  if (STI.hasW65816() && SrcTy.getSizeInBits() == 32) {
+      // Manually expand 24-bit comparison to A = lo; A |= hi; A |= bank;
+      Register B0 = MRI.createVirtualRegister(&MOS::Anyi8RegClass);
+      Register B1 = MRI.createVirtualRegister(&MOS::Anyi8RegClass);
+      Register B2 = MRI.createVirtualRegister(&MOS::Anyi8RegClass);
+  
+      auto C0 = Builder.buildCopy(B0, CmpSrc); C0->getOperand(1).setSubReg(MOS::sublo);
+      auto C1 = Builder.buildCopy(B1, CmpSrc); C1->getOperand(1).setSubReg(MOS::subhi);
+      auto C2 = Builder.buildCopy(B2, CmpSrc); C2->getOperand(1).setSubReg(MOS::subbank);
+  
+      Register Tmp = MRI.createVirtualRegister(&MOS::AcRegClass);
+      Builder.buildInstr(MOS::ORAImag8, {&MOS::AcRegClass}, {B0, B1});
+      Builder.buildInstr(MOS::ORAImag8, {Tmp}, {Tmp, B2});
+  
+      auto CmpBr = Builder.buildInstr(MOS::CmpBrZero)
+          .addMBB(Tgt)
+          .addUse(MOS::Z, RegState::Undef)
+          .addImm(FlagVal)
+          .addUse(Tmp);
+          
+      constrainSelectedInstRegOperands(*CmpBr, TII, TRI, RBI);
+      MI.eraseFromParent();
+      return true;
+  }
     auto Branch =
         Builder.buildInstr(MOS::CmpBrZeroMultiByte).addMBB(Tgt).addImm(FlagVal);
     for (const MachineOperand &MO : CMPZ->uses())
@@ -1771,8 +1769,8 @@ bool MOSInstructionSelector::selectMergeValues(MachineInstr &MI) {
                       .addDef(Dst)
                       .addUse(Lo).addImm(MOS::sublo)
                       .addUse(Hi).addImm(MOS::subhi)
-                      .addUse(Up).addImm(MOS::subupper)
-                      .addUse(Top).addImm(MOS::subtop);
+                      .addUse(Up).addImm(MOS::subbank)
+                      .addUse(Top).addImm(MOS::subpad);
     constrainGenericOp(*RegSeq);
     MI.eraseFromParent();
     return true;
@@ -1875,12 +1873,12 @@ bool MOSInstructionSelector::selectTrunc(MachineInstr &MI) {
   // Handle s16 <- s32: Extract low 16 bits (W65816)
   if (DstTy == S16 && SrcTy.getSizeInBits() == 32) {
     auto Copy = Builder.buildCopy(Dst, Src);
+    // This is now valid because RL explicitly lists sublo16 in SubRegIndices
     Copy->getOperand(1).setSubReg(MOS::sublo16);
     constrainGenericOp(*Copy);
     MI.eraseFromParent();
     return true;
   }
-
   return false;
 }
 
@@ -2046,30 +2044,20 @@ bool MOSInstructionSelector::selectUnMergeValues(MachineInstr &MI) {
     return true;
   }
   // Handle 32-bit unmerge to 8-bit parts
+
+
+
   if (Ty.getSizeInBits() == 32 && DstTy.getSizeInBits() == 8) {
-    Register Lo = MI.getOperand(0).getReg();
-    Register Hi = MI.getOperand(1).getReg();
-    Register Up = MI.getOperand(2).getReg();
-    Register Top = MI.getOperand(3).getReg();
-
-    auto LoCopy = Builder.buildCopy(Lo, Src);
-    LoCopy->getOperand(1).setSubReg(MOS::sublo);
-    constrainGenericOp(*LoCopy);
-
-    auto HiCopy = Builder.buildCopy(Hi, Src);
-    HiCopy->getOperand(1).setSubReg(MOS::subhi);
-    constrainGenericOp(*HiCopy);
-
-    auto UpCopy = Builder.buildCopy(Up, Src);
-    UpCopy->getOperand(1).setSubReg(MOS::subupper);
-    constrainGenericOp(*UpCopy);
-
-    auto TopCopy = Builder.buildCopy(Top, Src);
-    TopCopy->getOperand(1).setSubReg(MOS::subtop);
-    constrainGenericOp(*TopCopy);
-
-    MI.eraseFromParent();
-    return true;
+     // Define all 4 destination registers
+     for (unsigned i = 0; i < 4; ++i) {
+        auto PartCopy = Builder.buildCopy(MI.getOperand(i).getReg(), Src);
+        // Map: 0->sublo, 1->subhi, 2->subbank, 3->subpad
+        unsigned Indices[] = {MOS::sublo, MOS::subhi, MOS::subbank, MOS::subpad};
+        PartCopy->getOperand(1).setSubReg(Indices[i]);
+        constrainGenericOp(*PartCopy);
+     }
+     MI.eraseFromParent();
+     return true;
   }
 
   // Handle 32-bit unmerge to 16-bit parts
@@ -2088,12 +2076,12 @@ bool MOSInstructionSelector::selectUnMergeValues(MachineInstr &MI) {
     // Explicitly create virtual registers to handle the merge cleanly
     Register Up8 = Builder.getMRI()->createGenericVirtualRegister(S8);
     auto UpCopy = Builder.buildCopy(Up8, Src);
-    UpCopy->getOperand(1).setSubReg(MOS::subupper);
+    UpCopy->getOperand(1).setSubReg(MOS::subbank);
     constrainGenericOp(*UpCopy);
 
     Register Top8 = Builder.getMRI()->createGenericVirtualRegister(S8);
     auto TopCopy = Builder.buildCopy(Top8, Src);
-    TopCopy->getOperand(1).setSubReg(MOS::subtop);
+    TopCopy->getOperand(1).setSubReg(MOS::subpad);
     constrainGenericOp(*TopCopy);
 
     // FIX: Build REG_SEQUENCE directly to avoid recursive select and def issues

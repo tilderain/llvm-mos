@@ -74,13 +74,26 @@ for (unsigned R : seq_inclusive((unsigned)MOS::RS16, (unsigned)MOS::RS127))
   reserveAllSubregs(&Reserved, Register(R));
 
 // Reserve RL8 and above to maintain consistency with RS reservation
+
+
+  // RL0 contains RC0, RC1, RC2, RC3. 
+  // This effectively reserves RS0 (RC0+1) and RS1 (RC2+3).
+  reserveAllSubregs(&Reserved, MOS::RL0); 
+
+  // RL2 contains RC8, RC9, RC10, RC11.
+  // This effectively reserves RS4 (RC8+9) and RS5 (RC10+11).
+  // NOTE: If RS8 is your scavenger, ensure the RL that covers it is reserved!
+  // Assuming RS8 is RC16+17, that would be part of RL4.
+  reserveAllSubregs(&Reserved, MOS::RL4); 
 // (RL0-7 cover RS0-15)
+
 for (unsigned R : seq_inclusive((unsigned)MOS::RL8, (unsigned)MOS::RL63))
   reserveAllSubregs(&Reserved, Register(R));
 
   // 3. System registers
-  reserveAllSubregs(&Reserved, MOS::RS0); // Stack pointer
-  reserveAllSubregs(&Reserved, MOS::RS8); // Scavenger scratch
+
+
+  
 }
 
 const MCPhysReg *

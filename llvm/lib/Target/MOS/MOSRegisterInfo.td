@@ -14,23 +14,22 @@ class MOSSubRegIndex<int size, int offset = 0>: SubRegIndex<size, offset> {
   let Namespace = "MOS";
 }
 
-// Low byte of a 16-bit imaginary pointer register.
-def sublo : MOSSubRegIndex<8>;
 
-// High byte of a 16-bit imaginary pointer register.
-def subhi : MOSSubRegIndex<8, 8>;
+def sublo     : MOSSubRegIndex<8, 0>;
+def subhi     : MOSSubRegIndex<8, 8>;
+def subbank   : MOSSubRegIndex<8, 16>;
+def subpad    : MOSSubRegIndex<8, 24>;
 
-// Upper byte (bank) of a 32-bit/24-bit register.
-def subupper : MOSSubRegIndex<8, 16>;
+// 2. Define composite indices. 
+// DO NOT put these in the 'SubRegIndices' list of the register classes.
+// TableGen will automatically infer them for any reg that has the components.
+def sublo16 : MOSSubRegIndex<16, 0> {
+  let ComposedOf = [sublo, subhi];
+}
+def subhi16 : MOSSubRegIndex<16, 16> {
+  let ComposedOf = [subbank, subpad];
+}
 
-// Top byte of a 32-bit register.
-def subtop   : MOSSubRegIndex<8, 24>;
-
-// 16-bit Low word (for future composition or if needed)
-def sublo16  : MOSSubRegIndex<16, 0>;
-
-// 16-bit High word
-def subhi16  : MOSSubRegIndex<16, 16>;
 
 // Carry bit of the 8-bit processor status register.
 def subcarry : MOSSubRegIndex<1>;
@@ -130,20 +129,34 @@ def P : MOSReg<12, "P"> {
 multiclass MOSImagReg8<bits<16> num, string name> : MOSReg8<num, name>;
 
 // 16-bit imaginary registers (consecutive pairs of 8-bit registers).
+
 class MOSImagReg16<bits<16> num, string name, list<Register> subregs>
-    : MOSReg<num, name> {
+    : Register<name> {
   let SubRegs = subregs;
   let SubRegIndices = [sublo, subhi];
   let CoveredBySubRegs = 1;
+  let Namespace = "MOS";
 }
 
 // 32-bit imaginary registers (consecutive quads of 8-bit registers).
 // Defined using 8-bit subregs only to avoid TableGen ambiguity.
-class MOSImagReg32<bits<16> num, string name, list<Register> subregs8>
-    : MOSReg<num, name> {
-  let SubRegs = subregs8;
-  let SubRegIndices = [sublo, subhi, subupper, subtop];
+
+class MOSImagReg32<bits<16> num, string name, list<Register> subregs>
+    : Register<name> {
+  let SubRegs = subregs;
+  let SubRegIndices = [sublo, subhi, subbank, subpad];
   let CoveredBySubRegs = 1;
+  let Namespace = "MOS";
+}
+
+
+
+class MOSImagReg24<bits<16> num, string name, list<Register> subregs8>
+    : Register<name> {
+  let SubRegs = subregs8;
+  let SubRegIndices = [sublo, subhi, subbank];
+  let CoveredBySubRegs = 1;
+  let Namespace = "MOS";
 }
 
 defvar MaxImag8Regs = 256;
@@ -164,19 +177,24 @@ foreach I = 0...!add(MaxImag8Regs, -1) in {
 }
 
 // Imaginary 16-bit registers, starting with the prefix rs
+
 foreach I = 0...!add(MaxImag16Regs, -1) in {
-  // There exist MaxImag16Regs rsXX registers...
-  def RS#I: MOSImagReg16<!add(I, Imag16RegsOffset), "rs"#!cast<string>(I),
+  def RS#I: MOSImagReg16<
+      !add(I, Imag16RegsOffset), 
+      "rs"#!cast<string>(I),
       [!cast<Register>("RC"#!shl(I, 1)),
        !cast<Register>("RC"#!add(!shl(I,1),1))]>;
 }
 
 // Imaginary 32-bit registers, starting with the prefix rl
+
+// 3. Redefine RL registers to use RS registers as subregs
+// This is the "Magic Fix" for LiveVariables crashes.
+
 foreach I = 0...!add(MaxImag32Regs, -1) in {
   def RL#I: MOSImagReg32<
       !add(I, Imag32RegsOffset), 
       "rl"#!cast<string>(I),
-      // 8-bit subregs (RC)
       [!cast<Register>("RC"#!mul(I, 4)),
        !cast<Register>("RC"#!add(!mul(I, 4), 1)),
        !cast<Register>("RC"#!add(!mul(I, 4), 2)),
@@ -221,7 +239,9 @@ let isPressureFineGrained = true in {
 def Imag8 : MOSReg8Class<(sequence "RC%u", 0, !add(MaxImag8Regs, -1))>;
 def Imag16 : MOSReg16Class<(sequence "RS%u", 0, !add(MaxImag16Regs, -1))>;
 // Imag24 is actually 32-bit registers (RL) to handle 24-bit pointers via i32
-def Imag24 : MOSReg32Class<(sequence "RL%u", 0, !add(MaxImag32Regs, -1))>;
+def Imag24 : MOSRegClass<[i32], 8, (sequence "RL%u", 0, !add(MaxImag32Regs, -1))> {
+    let RegInfos = RegInfoByHwMode<[DefaultMode], [RegInfo<32, 32, 8>]>;
+}
 
 // Instruction-specific register classes.
 def AImag8 : MOSReg8Class<(add Imag8, A)>;
