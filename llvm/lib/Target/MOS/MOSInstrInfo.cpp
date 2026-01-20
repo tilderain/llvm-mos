@@ -96,6 +96,24 @@ void MOSInstrInfo::reMaterialize(MachineBasicBlock &MBB,
     MI->substituteRegister(MI->getOperand(0).getReg(), DestReg, SubIdx, TRI);
     MI->setDesc(get(MOS::LDImm16Remat));
     MBB.insert(I, MI);
+  } else if (Orig.getOpcode() == MOS::LDImm32 && SubIdx != 0) {
+    // FIX: Handle rematerialization of LDImm32 subregisters.
+    // Convert 32-bit load of a subreg into an 8-bit load of the specific byte.
+    int64_t Imm = Orig.getOperand(1).getImm();
+    int64_t ByteVal = 0;
+    
+    if (SubIdx == MOS::sublo) ByteVal = Imm & 0xFF;
+    else if (SubIdx == MOS::subhi) ByteVal = (Imm >> 8) & 0xFF;
+    else if (SubIdx == MOS::subupper) ByteVal = (Imm >> 16) & 0xFF;
+    else if (SubIdx == MOS::subtop) ByteVal = (Imm >> 24) & 0xFF;
+    else llvm_unreachable("Unexpected subreg index for LDImm32 remat");
+
+    MachineInstr *MI = MBB.getParent()->CloneMachineInstr(&Orig);
+    MI->removeOperand(1); // Remove i32imm
+    MI->substituteRegister(MI->getOperand(0).getReg(), DestReg, 0, TRI); // dest becomes new reg, no subidx
+    MI->setDesc(get(MOS::LDImm8Remat));
+    MI->addOperand(MachineOperand::CreateImm(ByteVal));
+    MBB.insert(I, MI);
   } else {
     TargetInstrInfo::reMaterialize(MBB, I, DestReg, SubIdx, Orig);
   }
@@ -926,7 +944,6 @@ static void loadStoreByteStaticStackSlot(MachineIRBuilder &Builder,
     Builder.buildInstr(MOS::COPY).add(MO).add(TmpUse);
   }
 }
-
 void MOSInstrInfo::loadStoreRegStackSlot(
     MachineBasicBlock &MBB, MachineBasicBlock::iterator MI, Register Reg,
     bool IsKill, int FrameIndex, const TargetRegisterClass *RC,
@@ -947,9 +964,7 @@ void MOSInstrInfo::loadStoreRegStackSlot(
   MachineIRBuilder Builder(MBB, MI);
   MachineInstrSpan MIS(MI, &MBB);
 
-  // If we're using the soft stack, since the offset is not yet known, it may
-  // be either 8 or 16 bits. Emit a 16-bit pseudo to be lowered during frame
-  // index elimination.
+  // If soft stack (dynamic), use pointer-based access
   if (!TFL.usesStaticStack(MF)) {
     Register Ptr = MRI.createVirtualRegister(&MOS::Imag16RegClass);
     auto Instr = Builder.buildInstr(IsLoad ? MOS::LDStk : MOS::STStk);
@@ -960,9 +975,11 @@ void MOSInstrInfo::loadStoreRegStackSlot(
       Instr.addDef(Ptr, RegState::EarlyClobber);
     Instr.addFrameIndex(FrameIndex).addImm(0).addMemOperand(MMO);
   } else {
+    // Static Stack
     if ((Reg.isPhysical() && MOS::Imag16RegClass.contains(Reg)) ||
         (Reg.isVirtual() &&
          MRI.getRegClass(Reg)->hasSuperClassEq(&MOS::Imag16RegClass))) {
+      // ... Existing 16-bit logic ...
       MachineOperand Lo = MachineOperand::CreateReg(Reg, IsLoad);
       MachineOperand Hi = Lo;
       Register Tmp = Reg;
@@ -970,32 +987,19 @@ void MOSInstrInfo::loadStoreRegStackSlot(
         Lo.setReg(TRI->getSubReg(Reg, MOS::sublo));
         Hi.setReg(TRI->getSubReg(Reg, MOS::subhi));
       } else {
-        assert(Reg.isVirtual());
-        // Live intervals for the original virtual register will already have
-        // been computed by this point. Since this code introduces
-        // subregisters, these must be using a new virtual register; otherwise
-        // there would be no subregister live ranges for the new instructions.
-        // This can cause VirtRegMap to fail.
         Tmp = MRI.createVirtualRegister(&MOS::Imag16RegClass);
-        Lo.setReg(Tmp);
-        Lo.setSubReg(MOS::sublo);
-        if (Lo.isDef())
-          Lo.setIsUndef();
-        Hi.setReg(Tmp);
-        Hi.setSubReg(MOS::subhi);
+        Lo.setReg(Tmp); Lo.setSubReg(MOS::sublo); if (Lo.isDef()) Lo.setIsUndef();
+        Hi.setReg(Tmp); Hi.setSubReg(MOS::subhi);
       }
-      if (!IsLoad && Tmp != Reg)
-        Builder.buildCopy(Tmp, Reg);
-      loadStoreByteStaticStackSlot(Builder, Lo, FrameIndex, 0,
-                                   MF.getMachineMemOperand(MMO, 0, 1));
-      loadStoreByteStaticStackSlot(Builder, Hi, FrameIndex, 1,
-                                   MF.getMachineMemOperand(MMO, 1, 1));
-      if (IsLoad && Tmp != Reg)
-        Builder.buildCopy(Reg, Tmp);
+      if (!IsLoad && Tmp != Reg) Builder.buildCopy(Tmp, Reg);
+      loadStoreByteStaticStackSlot(Builder, Lo, FrameIndex, 0, MF.getMachineMemOperand(MMO, 0, 1));
+      loadStoreByteStaticStackSlot(Builder, Hi, FrameIndex, 1, MF.getMachineMemOperand(MMO, 1, 1));
+      if (IsLoad && Tmp != Reg) Builder.buildCopy(Reg, Tmp);
+
     } else if ((Reg.isPhysical() && MOS::Imag24RegClass.contains(Reg)) ||
                (Reg.isVirtual() &&
                 MRI.getRegClass(Reg)->hasSuperClassEq(&MOS::Imag24RegClass))) {
-      // 32-bit (Imag24) split logic for 65816/Large pointers
+      // FIX: 32-bit (Imag24) split logic
       const unsigned SubRegs[] = {MOS::sublo, MOS::subhi, MOS::subupper, MOS::subtop};
       MachineOperand Ops[4] = {
           MachineOperand::CreateReg(Reg, IsLoad), MachineOperand::CreateReg(Reg, IsLoad),
@@ -1003,7 +1007,6 @@ void MOSInstrInfo::loadStoreRegStackSlot(
       };
       
       Register Tmp = Reg;
-      // If virtual, use a temporary to attach subregs to avoid VirtRegMap issues
       if (Reg.isVirtual()) {
           Tmp = MRI.createVirtualRegister(&MOS::Imag24RegClass);
       }
@@ -1035,12 +1038,6 @@ void MOSInstrInfo::loadStoreRegStackSlot(
 
   for (auto &MI : make_range(MIS.begin(), MIS.getInitial()))
     MI.setFlag(Flags);
-
-  LLVM_DEBUG({
-    dbgs() << "Inserted stack slot load/store:\n";
-    for (const auto &MI : make_range(MIS.begin(), MIS.getInitial()))
-      dbgs() << MI;
-  });
 }
 
 const TargetRegisterClass *
@@ -1106,6 +1103,9 @@ bool MOSInstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
     expandCmpBr(Builder);
     break;
 
+  case MOS::LDImm8Remat: // NEW
+    expandLDImm8Remat(Builder);
+    break;
   // Control flow
   case MOS::GBR:
     expandGBR(Builder);
@@ -1115,6 +1115,21 @@ bool MOSInstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
   return Changed;
 }
 
+void MOSInstrInfo::expandLDImm8Remat(MachineIRBuilder &Builder) const {
+  MachineInstr &MI = *Builder.getInsertPt();
+  Register Dst = MI.getOperand(0).getReg();
+  int64_t Val = MI.getOperand(1).getImm();
+  
+  // If destination is GPR, load directly. Otherwise (Imag8), load via scratch GPR.
+  if (MOS::GPRRegClass.contains(Dst)) {
+      Builder.buildInstr(MOS::LDImm, {Dst}, {Val});
+  } else {
+      Register Scratch = createVReg(Builder, MOS::GPRRegClass);
+      Builder.buildInstr(MOS::LDImm, {Scratch}, {Val});
+      Builder.buildCopy(Dst, Scratch);
+  }
+  MI.eraseFromParent();
+}
 
 // 2. Update expandLDImm32 to use the flags
 

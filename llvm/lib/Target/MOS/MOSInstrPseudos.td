@@ -349,6 +349,16 @@ def LDImm32 : MOSPseudo {
   dag OutOperandList = (outs Imag24:$dst);
   dag InOperandList = (ins i32imm:$val);
 
+  let isAsCheapAsAMove = false;
+  let isMoveImm = true;
+  let isReMaterializable = true;
+}
+
+
+def LDImm8Remat : MOSPseudo {
+  dag OutOperandList = (outs Anyi8:$dst);
+  dag InOperandList = (ins i8imm:$val);
+
   let isAsCheapAsAMove = true;
   let isMoveImm = true;
   let isReMaterializable = true;

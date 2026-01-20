@@ -138,6 +138,7 @@ private:
   // Post RA pseudos
   void expandLDIdx(MachineIRBuilder &Builder, bool ZP) const;
   void expandLDImm1(MachineIRBuilder &Builder) const;
+  void expandLDImm8Remat(MachineIRBuilder &Builder) const; 
   void expandLDImm16(MachineIRBuilder &Builder) const;
   void expandLDImm16Remat(MachineIRBuilder &Builder) const;
   void expandLDImm32(MachineIRBuilder &Builder) const; // Added
