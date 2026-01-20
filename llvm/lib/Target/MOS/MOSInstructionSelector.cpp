@@ -1871,11 +1871,27 @@ bool MOSInstructionSelector::selectTrunc(MachineInstr &MI) {
   }
 
   // Handle s16 <- s32: Extract low 16 bits (W65816)
+
   if (DstTy == S16 && SrcTy.getSizeInBits() == 32) {
-    auto Copy = Builder.buildCopy(Dst, Src);
-    // This is now valid because RL explicitly lists sublo16 in SubRegIndices
-    Copy->getOperand(1).setSubReg(MOS::sublo16);
-    constrainGenericOp(*Copy);
+    // Manually extract 8-bit parts to avoid reliance on composite subregs (sublo16)
+    // which may not be valid for all register classes.
+    Register Lo8 = Builder.getMRI()->createGenericVirtualRegister(S8);
+    auto LoCopy = Builder.buildCopy(Lo8, Src);
+    LoCopy->getOperand(1).setSubReg(MOS::sublo);
+    constrainGenericOp(*LoCopy);
+
+    Register Hi8 = Builder.getMRI()->createGenericVirtualRegister(S8);
+    auto HiCopy = Builder.buildCopy(Hi8, Src);
+    HiCopy->getOperand(1).setSubReg(MOS::subhi);
+    constrainGenericOp(*HiCopy);
+
+    // Merge them back into the 16-bit destination
+    auto RegSeq = Builder.buildInstr(MOS::REG_SEQUENCE)
+                      .addDef(Dst)
+                      .addUse(Lo8).addImm(MOS::sublo)
+                      .addUse(Hi8).addImm(MOS::subhi);
+    constrainGenericOp(*RegSeq);
+
     MI.eraseFromParent();
     return true;
   }
@@ -2061,18 +2077,30 @@ bool MOSInstructionSelector::selectUnMergeValues(MachineInstr &MI) {
   }
 
   // Handle 32-bit unmerge to 16-bit parts
+
   if (Ty.getSizeInBits() == 32 && DstTy.getSizeInBits() == 16) {
     Register Lo16 = MI.getOperand(0).getReg();
     Register Hi16 = MI.getOperand(1).getReg();
+    LLT S8 = LLT::scalar(8);
 
-    // Extract Lower 16 bits directly using sublo16
-    auto LoCopy = Builder.buildCopy(Lo16, Src);
-    LoCopy->getOperand(1).setSubReg(MOS::sublo16);
+    // Extract Lower 16 bits manually
+    Register Lo8 = Builder.getMRI()->createGenericVirtualRegister(S8);
+    auto LoCopy = Builder.buildCopy(Lo8, Src);
+    LoCopy->getOperand(1).setSubReg(MOS::sublo);
     constrainGenericOp(*LoCopy);
 
+    Register Hi8 = Builder.getMRI()->createGenericVirtualRegister(S8);
+    auto HiCopy = Builder.buildCopy(Hi8, Src);
+    HiCopy->getOperand(1).setSubReg(MOS::subhi);
+    constrainGenericOp(*HiCopy);
+
+    auto RegSeqLo = Builder.buildInstr(MOS::REG_SEQUENCE)
+                      .addDef(Lo16)
+                      .addUse(Lo8).addImm(MOS::sublo)
+                      .addUse(Hi8).addImm(MOS::subhi);
+    constrainGenericOp(*RegSeqLo);
+
     // Extract Upper 16 bits by extracting 8-bit parts and merging
-    LLT S8 = LLT::scalar(8);
-    
     // Explicitly create virtual registers to handle the merge cleanly
     Register Up8 = Builder.getMRI()->createGenericVirtualRegister(S8);
     auto UpCopy = Builder.buildCopy(Up8, Src);
@@ -2084,12 +2112,11 @@ bool MOSInstructionSelector::selectUnMergeValues(MachineInstr &MI) {
     TopCopy->getOperand(1).setSubReg(MOS::subpad);
     constrainGenericOp(*TopCopy);
 
-    // FIX: Build REG_SEQUENCE directly to avoid recursive select and def issues
-    auto RegSeq = Builder.buildInstr(MOS::REG_SEQUENCE)
+    auto RegSeqHi = Builder.buildInstr(MOS::REG_SEQUENCE)
                       .addDef(Hi16)
                       .addUse(Up8).addImm(MOS::sublo)
                       .addUse(Top8).addImm(MOS::subhi);
-    constrainGenericOp(*RegSeq);
+    constrainGenericOp(*RegSeqHi);
 
     MI.eraseFromParent();
     return true;
