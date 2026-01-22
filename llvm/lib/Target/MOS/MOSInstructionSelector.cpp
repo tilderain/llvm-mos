@@ -1006,30 +1006,31 @@ bool MOSInstructionSelector::selectBrCondImm(MachineInstr &MI) {
     LLT SrcTy = MRI.getType(CmpSrc);
 
 
-  if (STI.hasW65816() && SrcTy.getSizeInBits() == 32) {
-      // Manually expand 24-bit comparison to A = lo; A |= hi; A |= bank;
-      Register B0 = MRI.createVirtualRegister(&MOS::Anyi8RegClass);
-      Register B1 = MRI.createVirtualRegister(&MOS::Anyi8RegClass);
-      Register B2 = MRI.createVirtualRegister(&MOS::Anyi8RegClass);
-  
-      auto C0 = Builder.buildCopy(B0, CmpSrc); C0->getOperand(1).setSubReg(MOS::sublo);
-      auto C1 = Builder.buildCopy(B1, CmpSrc); C1->getOperand(1).setSubReg(MOS::subhi);
-      auto C2 = Builder.buildCopy(B2, CmpSrc); C2->getOperand(1).setSubReg(MOS::subbank);
-  
-      Register Tmp = MRI.createVirtualRegister(&MOS::AcRegClass);
-      Builder.buildInstr(MOS::ORAImag8, {&MOS::AcRegClass}, {B0, B1});
-      Builder.buildInstr(MOS::ORAImag8, {Tmp}, {Tmp, B2});
-  
-      auto CmpBr = Builder.buildInstr(MOS::CmpBrZero)
-          .addMBB(Tgt)
-          .addUse(MOS::Z, RegState::Undef)
-          .addImm(FlagVal)
-          .addUse(Tmp);
-          
-      constrainSelectedInstRegOperands(*CmpBr, TII, TRI, RBI);
-      MI.eraseFromParent();
-      return true;
-  }
+    if (STI.hasW65816() && SrcTy.getSizeInBits() == 32) {
+        // Extract 4 bytes for i32
+
+       Register B0 = CMPZ->getOperand(1).getReg();
+       Register B1 = CMPZ->getOperand(2).getReg();
+       Register B2 = CMPZ->getOperand(3).getReg();
+       Register B3 = CMPZ->getOperand(4).getReg();
+
+       // Chain the bytes using ORA to see if any bit is set.
+       // We call .getReg(0) to store the result as a Register for the next step.
+       Register T1 = Builder.buildInstr(MOS::ORAImag8, {&MOS::AcRegClass}, {B0, B1}).getReg(0);
+       Register T2 = Builder.buildInstr(MOS::ORAImag8, {&MOS::AcRegClass}, {T1, B2}).getReg(0);
+       Register T3 = Builder.buildInstr(MOS::ORAImag8, {&MOS::AcRegClass}, {T2, B3}).getReg(0);
+
+       // Emit the bundled branch. CmpBrZero uses the Z flag from the last ORA.
+       auto CmpBr = Builder.buildInstr(MOS::CmpBrZero)
+           .addMBB(Tgt)
+           .addUse(MOS::Z, RegState::Undef)
+           .addImm(FlagVal)
+           .addUse(T3);
+           
+       constrainSelectedInstRegOperands(*CmpBr, TII, TRI, RBI);
+       MI.eraseFromParent();
+       return true;
+    }
     auto Branch =
         Builder.buildInstr(MOS::CmpBrZeroMultiByte).addMBB(Tgt).addImm(FlagVal);
     for (const MachineOperand &MO : CMPZ->uses())

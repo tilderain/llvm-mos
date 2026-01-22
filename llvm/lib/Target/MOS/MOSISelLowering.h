@@ -24,6 +24,8 @@ class MOSSubtarget;
 class MOSTargetMachine;
 
 class MOSTargetLowering : public TargetLowering {
+private:
+  const MOSSubtarget &STI; // <--- ADD THIS LINE
 public:
   MOSTargetLowering(const MOSTargetMachine &TM, const MOSSubtarget &STI);
 

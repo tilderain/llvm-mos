@@ -40,7 +40,7 @@ using namespace llvm;
 
 MOSTargetLowering::MOSTargetLowering(const MOSTargetMachine &TM,
                                      const MOSSubtarget &STI)
-    : TargetLowering(TM, STI) {
+    : TargetLowering(TM, STI), STI(STI) {
   addRegisterClass(MVT::i1, &MOS::Anyi1RegClass);
   addRegisterClass(MVT::i8, &MOS::Anyi8RegClass);
   addRegisterClass(MVT::i16, &MOS::Imag16RegClass);
@@ -89,16 +89,23 @@ MOSTargetLowering::getNumRegisters(LLVMContext &Context, EVT VT,
 MVT MOSTargetLowering::getRegisterTypeForCallingConv(
     LLVMContext &Context, CallingConv::ID CC, EVT VT,
     const ISD::ArgFlagsTy &Flags) const {
-  if (Flags.isPointer())
+  if (Flags.isPointer()) {
+    // Use the class member STI
+    if (STI.hasW65816() && VT.getSizeInBits() == 32)
+      return MVT::i32;
     return Flags.getPointerAddrSpace() == MOS::AS_ZeroPage ? MVT::i8 : MVT::i16;
+  }
   return TargetLowering::getRegisterTypeForCallingConv(Context, CC, VT, Flags);
 }
 
 unsigned MOSTargetLowering::getNumRegistersForCallingConv(
     LLVMContext &Context, CallingConv::ID CC, EVT VT,
     const ISD::ArgFlagsTy &Flags) const {
-  if (Flags.isPointer())
-    return 1;
+  if (Flags.isPointer()) {
+    // Calculate how many registers are needed based on the type
+    MVT RegVT = getRegisterTypeForCallingConv(Context, CC, VT, Flags);
+    return (VT.getSizeInBits() + RegVT.getSizeInBits() - 1) / RegVT.getSizeInBits();
+  }
   return TargetLowering::getNumRegistersForCallingConv(Context, CC, VT, Flags);
 }
 

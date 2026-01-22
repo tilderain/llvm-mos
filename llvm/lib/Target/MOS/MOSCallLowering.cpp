@@ -159,6 +159,7 @@ struct MOSIncomingValueHandler : CallLowering::IncomingValueHandler {
       report_fatal_error("Not yet implemented.");
     case 8:
     case 16:
+    case 32:
       break;
     }
 

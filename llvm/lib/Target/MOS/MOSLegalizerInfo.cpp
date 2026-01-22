@@ -530,7 +530,7 @@ case G_TRUNC: {
        if (IntDstTy.getSizeInBits() < SrcTy.getSizeInBits()) {
            Tmp = Helper.MIRBuilder.buildTrunc(IntDstTy, Src).getReg(0);
        } else if (IntDstTy.getSizeInBits() > SrcTy.getSizeInBits()) {
-           Tmp = Helper.MIRBuilder.buildAnyExt(IntDstTy, Src).getReg(0);
+           Tmp = Helper.MIRBuilder.buildZExt(IntDstTy, Src).getReg(0);
        }
        
        Helper.MIRBuilder.buildIntToPtr(Dst, Tmp);
@@ -705,16 +705,17 @@ bool MOSLegalizerInfo::legalizeAnyExt(LegalizerHelper &Helper,
     } else if (SrcTy.getSizeInBits() == 8) {
       Parts.push_back(Src);
     } else if (SrcTy.getSizeInBits() == 1) {
-      // Promote s1 to s8 via ZEXT (handled by legalizeZExt)
+      // Promote s1 to s8 via ZEXT
       auto ZExt8 = Builder.buildZExt(S8, Src);
       Parts.push_back(ZExt8.getReg(0));
     } else {
       return false; // Unsupported source size
     }
 
-    // Fill high bytes with Undef
+    // Fill high bytes with Zero (SAFE) instead of Undef (UNSAFE)
+    auto Zero8 = Builder.buildConstant(S8, 0).getReg(0);
     while (Parts.size() < 4) {
-      Parts.push_back(Builder.buildUndef(S8).getReg(0));
+      Parts.push_back(Zero8);
     }
 
     Builder.buildMergeValues(Dst, Parts);
@@ -1398,7 +1399,6 @@ static Register buildNZSelect(Register R, MachineIRBuilder &Builder) {
                    Builder.buildConstant(S1, 0))
       .getReg(0);
 }
-
 bool MOSLegalizerInfo::legalizeICmp(LegalizerHelper &Helper,
                                     MachineRegisterInfo &MRI,
                                     MachineInstr &MI) const {
@@ -1409,9 +1409,76 @@ bool MOSLegalizerInfo::legalizeICmp(LegalizerHelper &Helper,
       static_cast<CmpInst::Predicate>(MI.getOperand(1).getPredicate());
   Register LHS = MI.getOperand(2).getReg();
   Register RHS = MI.getOperand(3).getReg();
+  LLT Type = MRI.getType(LHS);
+  LLT S1 = LLT::scalar(1);
+  LLT S8 = LLT::scalar(8);
 
-  // Implement most comparisons in terms of EQ, UGE, and SLT, as these can be
-  // implemented directly via 6502 flags.
+  const MOSSubtarget &STI = Builder.getMF().getSubtarget<MOSSubtarget>();
+  bool RHSIsZero = mi_match(RHS, MRI, m_SpecificICst(0));
+
+  // --- 1. POINTER HANDLING ---
+  if (Type.isPointer()) {
+    LLT S = LLT::scalar(Type.getScalarSizeInBits());
+    if (STI.hasW65816() && S.getSizeInBits() == 32) {
+      // W65816 24-bit pointers in 32-bit registers: Mask the high padding byte.
+      auto Mask = Builder.buildConstant(S, 0x00FFFFFF);
+      auto LHSInt = Builder.buildPtrToInt(S, LHS);
+      auto RHSInt = Builder.buildPtrToInt(S, RHS);
+      auto LHSMasked = Builder.buildAnd(S, LHSInt, Mask);
+      auto RHSMasked = Builder.buildAnd(S, RHSInt, Mask);
+
+      Helper.Observer.changingInstr(MI);
+      MI.getOperand(2).setReg(LHSMasked.getReg(0));
+      MI.getOperand(3).setReg(RHSMasked.getReg(0));
+      Helper.Observer.changedInstr(MI);
+      return true;
+    }
+    Helper.Observer.changingInstr(MI);
+    MI.getOperand(2).setReg(Builder.buildPtrToInt(S, LHS).getReg(0));
+    MI.getOperand(3).setReg(Builder.buildPtrToInt(S, RHS).getReg(0));
+    Helper.Observer.changedInstr(MI);
+    return true;
+  }
+
+  // --- 2. MULTI-BYTE ZERO CHECK BUNDLING ---
+  // Fixes Infinite Loop by bundling 32-bit NE/EQ checks so they can't be split.
+  if (RHSIsZero && (Pred == CmpInst::ICMP_EQ || Pred == CmpInst::ICMP_NE) &&
+      Type.getSizeInBits() > 8) {
+    
+    // Ensure the only user is a branch that we can update.
+    if (MRI.hasOneNonDBGUse(Dst)) {
+      MachineInstr &UseMI = *MRI.use_instr_nodbg_begin(Dst);
+      if (UseMI.getOpcode() == MOS::G_BRCOND_IMM) {
+        
+        // 1. If NE (Not Equal), flip the branch condition (Jump if False -> Jump if True)
+        // because G_CMPZ returns True for Zero (Equal).
+        if (Pred == CmpInst::ICMP_NE) {
+          Helper.Observer.changingInstr(UseMI);
+          int64_t OldVal = UseMI.getOperand(2).getImm();
+          UseMI.getOperand(2).setImm(OldVal ? 0 : 1);
+          Helper.Observer.changedInstr(UseMI);
+        }
+
+        // 2. Unmerge the source value into bytes.
+        auto Unmerge = Builder.buildUnmerge(S8, LHS);
+
+        // 3. Mutate ICMP into G_CMPZ in-place.
+        Helper.Observer.changingInstr(MI);
+        MI.setDesc(Builder.getTII().get(MOS::G_CMPZ));
+        MI.removeOperand(3); // Remove RHS
+        MI.removeOperand(2); // Remove LHS
+        MI.removeOperand(1); // Remove Predicate
+        // Add the byte operands
+        for (unsigned i = 0; i < Unmerge->getNumDefs(); ++i)
+          MI.addOperand(MachineOperand::CreateReg(Unmerge.getReg(i), false));
+        Helper.Observer.changedInstr(MI);
+        
+        return true;
+      }
+    }
+  }
+
+  // --- 3. PREDICATE NORMALIZATION ---
   switch (Pred) {
   case CmpInst::ICMP_NE:
   case CmpInst::ICMP_ULT:
@@ -1430,60 +1497,8 @@ bool MOSLegalizerInfo::legalizeICmp(LegalizerHelper &Helper,
     break;
   }
 
-  LLT Type = MRI.getType(LHS);
-
-  // Compare pointers by first converting to integer. This allows the
-  // comparison to be reduced to 8-bit comparisons.
-  const MOSSubtarget &STI = Builder.getMF().getSubtarget<MOSSubtarget>(); // Ensure STI is available
-
-
-  if (Type.isPointer()) {
-    LLT S = LLT::scalar(Type.getScalarSizeInBits());
-
-    // START FIX: Mask high byte for W65816 24-bit pointers (which use 32-bit registers)
-    if (STI.hasW65816() && S.getSizeInBits() == 32) {
-        auto LHSInt = Builder.buildPtrToInt(S, LHS);
-        auto RHSInt = Builder.buildPtrToInt(S, RHS);
-        
-
-    auto Mask = Builder.buildConstant(S, 0x00FFFFFF);
-    auto LHSMasked = Builder.buildAnd(S, Builder.buildPtrToInt(S, LHS), Mask);
-    auto RHSMasked = Builder.buildAnd(S, Builder.buildPtrToInt(S, RHS), Mask);
-
-        Helper.Observer.changingInstr(MI);
-        MI.getOperand(2).setReg(LHSMasked.getReg(0));
-        MI.getOperand(3).setReg(RHSMasked.getReg(0));
-        Helper.Observer.changedInstr(MI);
-        return true;
-    }
-    // END FIX
-
-    Helper.Observer.changingInstr(MI);
-    MI.getOperand(2).setReg(Builder.buildPtrToInt(S, LHS).getReg(0));
-    MI.getOperand(3).setReg(Builder.buildPtrToInt(S, RHS).getReg(0));
-    Helper.Observer.changedInstr(MI);
-    return true;
-  }
-
-  LLT S1 = LLT::scalar(1);
-  LLT S8 = LLT::scalar(8);
-
-  bool RHSIsZero = mi_match(RHS, MRI, m_SpecificICst(0));
-  Register CIn;
-
+  // --- 4. MULTI-BYTE CHUNKING ---
   if (Type != S8) {
-    if (RHSIsZero && Pred == CmpInst::ICMP_EQ &&
-        all_of(MRI.use_instructions(Dst), [](const MachineInstr &MI) {
-          return MI.getOpcode() == MOS::G_BRCOND_IMM;
-        })) {
-      auto Unmerge = Builder.buildUnmerge(S8, LHS);
-      auto Cmp = Builder.buildInstr(MOS::G_CMPZ, {Dst}, {});
-      for (const MachineOperand &MO : unmergeDefs(Unmerge))
-        Cmp.addUse(MO.getReg());
-      MI.eraseFromParent();
-      return true;
-    }
-
     if (Pred != CmpInst::ICMP_SLT) {
       Register LHSHigh, LHSRest;
       Register RHSHigh, RHSRest;
@@ -1491,29 +1506,23 @@ bool MOSLegalizerInfo::legalizeICmp(LegalizerHelper &Helper,
       std::tie(RHSHigh, RHSRest) = splitHighRest(RHS, Builder);
 
       auto EqHigh = Builder.buildICmp(CmpInst::ICMP_EQ, S1, LHSHigh, RHSHigh);
-      // If EqHigh is false, we defer to CmpHigh, which is equal to EqHigh if
-      // Pred==ICMP_EQ.
       auto CmpHigh = (Pred == CmpInst::ICMP_EQ)
                          ? Builder.buildConstant(S1, 0)
                          : Builder.buildICmp(Pred, S1, LHSHigh, RHSHigh);
       auto RestPred = Pred;
       if (CmpInst::isSigned(RestPred))
         RestPred = ICmpInst::getUnsignedPredicate(Pred);
-      auto CmpRest =
-          Builder.buildICmp(RestPred, S1, LHSRest, RHSRest).getReg(0);
+      auto CmpRest = Builder.buildICmp(RestPred, S1, LHSRest, RHSRest).getReg(0);
 
-      // If the high byte is equal, defer to the unsigned comparison on the
-      // rest. Otherwise, defer to the comparison on the high byte.
       Builder.buildSelect(Dst, EqHigh, CmpRest, CmpHigh);
       MI.eraseFromParent();
       return true;
     }
 
+    // Signed Less Than (SLT)
     auto LHSUnmerge = Builder.buildUnmerge(S8, LHS);
     auto LHSUnmergeDefs = unmergeDefsSplitHigh(LHSUnmerge);
 
-    // Determining whether the LHS is negative only requires looking at the
-    // highest byte (bit, really).
     if (RHSIsZero) {
       Helper.Observer.changingInstr(MI);
       MI.getOperand(2).setReg(LHSUnmergeDefs.High.getReg());
@@ -1522,35 +1531,25 @@ bool MOSLegalizerInfo::legalizeICmp(LegalizerHelper &Helper,
       return true;
     }
 
-    // Perform multibyte signed comparisons by a multibyte subtraction.
     auto RHSUnmerge = Builder.buildUnmerge(S8, RHS);
     auto RHSUnmergeDefs = unmergeDefsSplitHigh(RHSUnmerge);
-    assert(LHSUnmerge->getNumOperands() == RHSUnmerge->getNumOperands());
-    CIn = Builder.buildConstant(S1, 1).getReg(0);
-    for (const auto &[LHS, RHS] :
-         zip(LHSUnmergeDefs.Lows, RHSUnmergeDefs.Lows)) {
-      auto Sbc =
-          Builder.buildInstr(MOS::G_SBC, {S8, S1, S1, S1, S1}, {LHS, RHS, CIn});
+    Register CIn = Builder.buildConstant(S1, 1).getReg(0);
+    for (const auto &IPart : zip(LHSUnmergeDefs.Lows, RHSUnmergeDefs.Lows)) {
+      auto Sbc = Builder.buildInstr(MOS::G_SBC, {S8, S1, S1, S1, S1}, 
+                                    {std::get<0>(IPart).getReg(), std::get<1>(IPart).getReg(), CIn});
       CIn = Sbc.getReg(1);
     }
-    Type = S8;
     LHS = LHSUnmergeDefs.High.getReg();
     RHS = RHSUnmergeDefs.High.getReg();
-    // Fall through to produce the final SBC that determines the comparison
-    // result.
   } else {
-    CIn = Builder.buildConstant(S1, 1).getReg(0);
+    Register CIn = Builder.buildConstant(S1, 1).getReg(0);
   }
 
-  assert(Type == S8);
-
-  // Lower 8-bit comparisons to a generic G_SBC instruction with similar
-  // capabilities to the 6502's SBC and CMP instructions.  See
-  // www.6502.org/tutorials/compare_beyond.html.
+  // --- 5. 8-BIT EMISSION ---
   switch (Pred) {
   case CmpInst::ICMP_EQ: {
-    auto Sbc =
-        Builder.buildInstr(MOS::G_SBC, {S8, S1, S1, S1, S1}, {LHS, RHS, CIn});
+    Register CIn = Builder.buildConstant(S1, 1).getReg(0);
+    auto Sbc = Builder.buildInstr(MOS::G_SBC, {S8, S1, S1, S1, S1}, {LHS, RHS, CIn});
     Register Z = Sbc.getReg(4);
     if (!isNZUseLegal(Dst, MRI))
       Z = buildNZSelect(Z, Builder);
@@ -1559,37 +1558,27 @@ bool MOSLegalizerInfo::legalizeICmp(LegalizerHelper &Helper,
     break;
   }
   case CmpInst::ICMP_UGE: {
-    auto Sbc =
-        Builder.buildInstr(MOS::G_SBC, {S8, S1, S1, S1, S1}, {LHS, RHS, CIn});
-    Builder.buildCopy(Dst, Sbc.getReg(1) /*=C*/);
+    Register CIn = Builder.buildConstant(S1, 1).getReg(0);
+    auto Sbc = Builder.buildInstr(MOS::G_SBC, {S8, S1, S1, S1, S1}, {LHS, RHS, CIn});
+    Builder.buildCopy(Dst, Sbc.getReg(1)); 
     MI.eraseFromParent();
     break;
   }
   case CmpInst::ICMP_SLT: {
-    // Subtractions of zero cannot overflow, so N is always correct.
+    Register CIn = Builder.buildConstant(S1, 1).getReg(0);
+    auto Sbc = Builder.buildInstr(MOS::G_SBC, {S8, S1, S1, S1, S1}, {LHS, RHS, CIn});
     if (RHSIsZero) {
-      auto Sbc =
-          Builder.buildInstr(MOS::G_SBC, {S8, S1, S1, S1, S1}, {LHS, RHS, CIn});
       Register N = Sbc.getReg(2);
       if (!isNZUseLegal(Dst, MRI))
         N = buildNZSelect(N, Builder);
       Builder.buildCopy(Dst, N);
     } else {
-      // General subtractions can overflow; if so, N is flipped.
-      auto Sbc =
-          Builder.buildInstr(MOS::G_SBC, {S8, S1, S1, S1, S1}, {LHS, RHS, CIn});
-      // The quickest way to XOR N with V is to XOR the accumulator with 0x80
-      // iff V, then reexamine N of the accumulator.
       auto Eor = Builder.buildXor(S8, Sbc, Builder.buildConstant(S8, 0x80));
       auto Zero = Builder.buildConstant(S8, 0);
       auto One = Builder.buildConstant(S1, 1);
-      Register N =
-          Builder
-              .buildInstr(
-                  MOS::G_SBC, {S8, S1, S1, S1, S1},
-                  {Builder.buildSelect(S8, Sbc.getReg(3) /*=V*/, Eor, Sbc),
-                   Zero, One})
-              .getReg(2);
+      Register N = Builder.buildInstr(MOS::G_SBC, {S8, S1, S1, S1, S1},
+                                     {Builder.buildSelect(S8, Sbc.getReg(3), Eor, Sbc),
+                                      Zero, One}).getReg(2);
       if (!isNZUseLegal(Dst, MRI))
         N = buildNZSelect(N, Builder);
       Builder.buildCopy(Dst, N);

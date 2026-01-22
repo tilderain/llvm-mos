@@ -1019,19 +1019,20 @@ void MOSInstrInfo::loadStoreRegStackSlot(
       // FIX: 32-bit (Imag24) split logic
 
       // FIX: Only 3 bytes exist for the 24-bit pointer
-      const unsigned SubRegs[] = {MOS::sublo, MOS::subhi, MOS::subbank};
-      MachineOperand Ops[3] = {
+      const unsigned SubRegs[] = {MOS::sublo, MOS::subhi, MOS::subbank, MOS::subpad};
+      MachineOperand Ops[4] = {
           MachineOperand::CreateReg(Reg, IsLoad), 
+          MachineOperand::CreateReg(Reg, IsLoad),
           MachineOperand::CreateReg(Reg, IsLoad),
           MachineOperand::CreateReg(Reg, IsLoad)
       };
-      
+
       Register Tmp = Reg;
       if (Reg.isVirtual()) {
           Tmp = MRI.createVirtualRegister(&MOS::Imag24RegClass);
       }
 
-      for (int i = 0; i < 3; ++i) { // Only 3 iterations
+      for (int i = 0; i < 4; ++i) { // CHANGED: Loop 4 times
           if (Reg.isPhysical()) {
               Ops[i].setReg(TRI->getSubReg(Reg, SubRegs[i]));
           } else {
@@ -1043,13 +1044,12 @@ void MOSInstrInfo::loadStoreRegStackSlot(
 
       if (!IsLoad && Tmp != Reg) Builder.buildCopy(Tmp, Reg);
 
-      for (int i = 0; i < 3; ++i) {
+      for (int i = 0; i < 4; ++i) { // CHANGED: Loop 4 times
           loadStoreByteStaticStackSlot(Builder, Ops[i], FrameIndex, i, 
                                        MF.getMachineMemOperand(MMO, i, 1));
       }
 
       if (IsLoad && Tmp != Reg) Builder.buildCopy(Reg, Tmp);
-
     } else {
       loadStoreByteStaticStackSlot(
           Builder, MachineOperand::CreateReg(Reg, IsLoad), FrameIndex, 0, MMO);
@@ -1152,7 +1152,6 @@ void MOSInstrInfo::expandLDImm8Remat(MachineIRBuilder &Builder) const {
 }
 
 // 2. Update expandLDImm32 to use the flags
-
 void MOSInstrInfo::expandLDImm32(MachineIRBuilder &Builder) const {
   auto &MI = *Builder.getInsertPt();
   const TargetRegisterInfo &TRI = *Builder.getMF().getSubtarget<MOSSubtarget>().getRegisterInfo();
@@ -1161,25 +1160,26 @@ void MOSInstrInfo::expandLDImm32(MachineIRBuilder &Builder) const {
 
   // Use PHA/PLA to save A, as we use it for transfer.
   Builder.buildInstr(MOS::PHA_Implied);
-  
+
   const unsigned SubRegs[] = {MOS::sublo, MOS::subhi, MOS::subbank, MOS::subpad};
   const unsigned Shifts[] = {0, 8, 16, 24};
   const unsigned Flags[] = {MOS::MO_LO, MOS::MO_HI, MOS::MO_UPPER};
 
-
-
   for (int i = 0; i < 4; ++i) {
     Register PhysSubReg = TRI.getSubReg(Dst, SubRegs[i]);
     
-    // CRASH PREVENTION: If TableGen mapping is wrong, stop here 
-    // instead of emitting $noreg.
+    // CRASH PREVENTION
     if (!PhysSubReg) {
-        // Corrected concatenation using Twine
         report_fatal_error(Twine("Register ") + TRI.getName(Dst) + 
                            " has no subreg at index " + Twine(i));
     }
 
-    auto Ld = Builder.buildInstr(MOS::LDA_Immediate, {MOS::A}, {});
+    // --- FIX IS HERE ---
+    // Use buildInstr WITHOUT explicit register destination {MOS::A}.
+    // LDA_Immediate only takes the immediate operand. A is implicit.
+    auto Ld = Builder.buildInstr(MOS::LDA_Immediate);
+    // -------------------
+
     if (Src.isImm()) {
       // Byte 3 (padding) is always 0
       Ld.addImm((i < 3) ? (Src.getImm() >> Shifts[i]) & 0xFF : 0);

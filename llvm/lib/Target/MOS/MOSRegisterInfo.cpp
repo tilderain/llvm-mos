@@ -70,8 +70,9 @@ MOSRegisterInfo::MOSRegisterInfo()
   }
 
 
-for (unsigned R : seq_inclusive((unsigned)MOS::RS16, (unsigned)MOS::RS127))
-  reserveAllSubregs(&Reserved, Register(R));
+
+  for (unsigned R : seq_inclusive((unsigned)MOS::RS32, (unsigned)MOS::RS127))
+    reserveAllSubregs(&Reserved, Register(R));
 
 // Reserve RL8 and above to maintain consistency with RS reservation
 
@@ -87,11 +88,12 @@ for (unsigned R : seq_inclusive((unsigned)MOS::RS16, (unsigned)MOS::RS127))
   reserveAllSubregs(&Reserved, MOS::RL4); 
 // (RL0-7 cover RS0-15)
 
-for (unsigned R : seq_inclusive((unsigned)MOS::RL8, (unsigned)MOS::RL63))
-  reserveAllSubregs(&Reserved, Register(R));
 
-  // 3. System registers
+  for (unsigned R : seq_inclusive((unsigned)MOS::RL16, (unsigned)MOS::RL63))
+    reserveAllSubregs(&Reserved, Register(R));
 
+  // Reserve one temporary register for use by register scavenger.
+  reserveAllSubregs(&Reserved, MOS::RS8);
 
   
 }
