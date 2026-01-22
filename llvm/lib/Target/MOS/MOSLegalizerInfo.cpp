@@ -2510,26 +2510,64 @@ bool MOSLegalizerInfo::legalizeBrJt(LegalizerHelper &Helper,
   // Note: Jump table size is hard-limited to 256 entries.
   Register Offset = Builder.buildTrunc(S8, MI.getOperand(2)).getReg(0);
 
-  if (STI.hasJMPIdxIndir() && Table.MBBs.size() <= 128) {
+  if (STI.hasJMPIdxIndir() && !STI.hasW65816() && Table.MBBs.size() <= 128) {
     Offset =
         Builder.buildShl(S8, Offset, Builder.buildConstant(S8, 1)).getReg(0);
     Builder.buildInstr(MOS::G_BRINDIRECT_IDX)
         .add(MI.getOperand(1))
         .addUse(Offset);
   } else {
+    // This is the manual expansion path.
     Register LoAddr = MRI.createGenericVirtualRegister(S8);
-    Builder.buildInstr(MOS::G_LOAD_ABS_IDX)
-        .addDef(LoAddr)
-        .add(MI.getOperand(1))
-        .addUse(Offset);
+    Builder.buildInstr(MOS::G_LOAD_ABS_IDX).addDef(LoAddr).add(MI.getOperand(1)).addUse(Offset);
+
     Register HiAddr = MRI.createGenericVirtualRegister(S8);
-    Builder.buildInstr(MOS::G_LOAD_ABS_IDX)
-        .addDef(HiAddr)
-        .addJumpTableIndex(MI.getOperand(1).getIndex(), MOS::MO_HI_JT)
-        .addUse(Offset);
-    Builder.buildBrIndirect(
-        Builder.buildMergeValues(LLT::pointer(0, 16), {LoAddr, HiAddr})
-            .getReg(0));
+    Builder.buildInstr(MOS::G_LOAD_ABS_IDX).addDef(HiAddr)
+           .addJumpTableIndex(MI.getOperand(1).getIndex(), MOS::MO_HI_JT).addUse(Offset);
+
+    
+if (STI.hasW65816()) {
+    LLT S8 = LLT::scalar(8);
+    
+    // Create virtual registers for the 3 bytes
+    Register LoVal = MRI.createGenericVirtualRegister(S8);
+    Register HiVal = MRI.createGenericVirtualRegister(S8);
+    Register BankVal = MRI.createGenericVirtualRegister(S8);
+
+    // CRITICAL: Force these to the Accumulator (Ac) class
+    // This prevents the selector from picking LDY or LDX.
+    MRI.setRegClass(LoVal, &MOS::AcRegClass);
+    MRI.setRegClass(HiVal, &MOS::AcRegClass);
+    MRI.setRegClass(BankVal, &MOS::AcRegClass);
+
+    // Use G_LOAD_ABS_LONG (or G_LOAD_ABS_LONG_IDX if you defined it)
+    // To ensure the 'BF' opcode is used for all three.
+    Builder.buildInstr(MOS::G_LOAD_ABS_LONG)
+           .addDef(LoVal)
+           .addJumpTableIndex(MI.getOperand(1).getIndex(), MOS::MO_LO)
+           .addUse(Offset);
+
+    Builder.buildInstr(MOS::G_LOAD_ABS_LONG)
+           .addDef(HiVal)
+           .addJumpTableIndex(MI.getOperand(1).getIndex(), MOS::MO_HI_JT)
+           .addUse(Offset);
+
+    Builder.buildInstr(MOS::G_LOAD_ABS_LONG)
+           .addDef(BankVal)
+           .addJumpTableIndex(MI.getOperand(1).getIndex(), MOS::MO_UPPER)
+           .addUse(Offset);
+
+    // Merge into the pointer
+    Register Zero = Builder.buildConstant(S8, 0).getReg(0);
+    auto Ptr = Builder.buildMergeValues(LLT::pointer(0, 32), 
+                                       {LoVal, HiVal, BankVal, Zero});
+    Builder.buildBrIndirect(Ptr.getReg(0));
+}else {
+      // Original 6502 16-bit logic
+      Builder.buildBrIndirect(
+          Builder.buildMergeValues(LLT::pointer(0, 16), {LoAddr, HiAddr})
+              .getReg(0));
+    }
   }
 
   MI.eraseFromParent();

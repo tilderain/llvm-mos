@@ -2187,7 +2187,7 @@ bool MOSInstructionSelector::selectGeneric(MachineInstr &MI) {
   default:
     llvm_unreachable("Unexpected opcode.");
   case MOS::G_BRINDIRECT:
-    Opcode = MOS::JMPIndir;
+    Opcode = STI.hasW65816() ? MOS::JMLIndir : MOS::JMPIndir;
     break;
   case MOS::G_BRINDIRECT_IDX:
     Opcode = MOS::JMPIdxIndir;

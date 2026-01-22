@@ -55,7 +55,7 @@ bool MOSFrameLowering::assignCalleeSavedSpillSlots(
   MachineFrameInfo &MFI = MF.getFrameInfo();
   const auto &MOSFI = *MF.getInfo<MOSFunctionInfo>();
 
-  size_t HardStackRemaining = 4;
+  size_t HardStackRemaining = 0;
   for (CalleeSavedInfo &Info : CSI) {
     // Some CSRs may be rewritten to other zero page locations at
     // MOSStaticStackAlloc time. These don't need to be spilled.

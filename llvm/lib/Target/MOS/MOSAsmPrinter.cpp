@@ -233,37 +233,33 @@ void MOSAsmPrinter::emitJumpTableInfo() {
   if (!JTInDiffSection)
     OutStreamer->emitDataRegion(MCDR_DataRegionJT32);
 
+
   for (const auto &JTI : enumerate(JT)) {
     const std::vector<MachineBasicBlock *> &JTBBs = JTI.value().MBBs;
-
-    // If this jump table was deleted, ignore it.
-    if (JTBBs.empty())
-      continue;
+    if (JTBBs.empty()) continue;
 
     MCSymbol *JTISymbol = GetJTISymbol(JTI.index());
     OutStreamer->emitLabel(JTISymbol);
-    if (STI.hasJMPIdxIndir() && JTBBs.size() <= 128) {
-      // Jump tables with 128 entries or less can be instead accessed via
-      // indexed-indirect JMP. Emit the array of target addresses as-is.
-      for (const MachineBasicBlock *JTBB : JTBBs) {
-        OutStreamer->emitValue(
-            MCSymbolRefExpr::create(JTBB->getSymbol(), OutContext), 2);
-      }
-    } else {
-      // Emit an array of the low bytes of the target addresses.
-      for (const MachineBasicBlock *JTBB : JTBBs) {
-        OutStreamer->emitValue(MCSymbolRefExpr::create(JTBB->getSymbol(),
-                                                       MOSMCExpr::VK_ADDR16_LO,
-                                                       OutContext),
-                               1);
-      }
 
-      // Emit an array of the high bytes of the target addresses.
+    // FIX: Disable the as-is 2-byte emission for 65816
+    if (STI.hasJMPIdxIndir() && !STI.hasW65816() && JTBBs.size() <= 128) {
+        for (const MachineBasicBlock *JTBB : JTBBs) {
+            OutStreamer->emitValue(MCSymbolRefExpr::create(JTBB->getSymbol(), OutContext), 2);
+        }
+    } else {
+      // 1. Emit Low Bytes
       for (const MachineBasicBlock *JTBB : JTBBs) {
-        OutStreamer->emitValue(MCSymbolRefExpr::create(JTBB->getSymbol(),
-                                                       MOSMCExpr::VK_ADDR16_HI,
-                                                       OutContext),
-                               1);
+        OutStreamer->emitValue(MCSymbolRefExpr::create(JTBB->getSymbol(), MOSMCExpr::VK_ADDR16_LO, OutContext), 1);
+      }
+      // 2. Emit High Bytes
+      for (const MachineBasicBlock *JTBB : JTBBs) {
+        OutStreamer->emitValue(MCSymbolRefExpr::create(JTBB->getSymbol(), MOSMCExpr::VK_ADDR16_HI, OutContext), 1);
+      }
+      // 3. Emit Bank Bytes (NEW for 65816)
+      if (STI.hasW65816()) {
+        for (const MachineBasicBlock *JTBB : JTBBs) {
+          OutStreamer->emitValue(MCSymbolRefExpr::create(JTBB->getSymbol(), MOSMCExpr::VK_ADDR24_BANK, OutContext), 1);
+        }
       }
     }
   }

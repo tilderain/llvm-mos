@@ -397,6 +397,7 @@ MOSInstrInfo::getBranchDestBlock(const MachineInstr &MI) const {
   }
 }
 
+
 bool MOSInstrInfo::analyzeBranch(MachineBasicBlock &MBB,
                                  MachineBasicBlock *&TBB,
                                  MachineBasicBlock *&FBB,
@@ -404,7 +405,7 @@ bool MOSInstrInfo::analyzeBranch(MachineBasicBlock &MBB,
                                  bool AllowModify) const {
   auto I = MBB.getFirstTerminator();
 
-  // If no terminators, falls through.
+  // If no terminators, it falls through.
   if (I == MBB.end()) {
     TBB = nullptr;
     FBB = nullptr;
@@ -412,77 +413,75 @@ bool MOSInstrInfo::analyzeBranch(MachineBasicBlock &MBB,
     return false;
   }
 
-  // Non-branch terminators cannot be analyzed.
+  // If there is only one terminator and it's not a branch (e.g., RTS/RTL),
+  // we can't analyze it.
   if (!I->isBranch())
     return true;
 
-  // Analyze first branch.
-  auto FirstBR = I++;
-  if (FirstBR->isPreISelOpcode())
-    return true;
-  // First branch always forms true edge, whether conditional or unconditional.
+  // Handle the first branch
+  MachineInstr *FirstBR = &*I;
   TBB = getBranchDestBlock(*FirstBR);
-  if (!TBB)
-    return true;
+  if (!TBB) return true; // Indirect branch or something we can't handle
+
   if (FirstBR->isConditionalBranch()) {
-    if (!FirstBR->memoperands_empty()) {
-      assert(FirstBR->hasOneMemOperand() &&
-             "CmpBr should have at most one mem operand");
-      // Don't futz with volatile compare and branches; the compare part has to
-      // happen, and we can't lose the MMO that says the compare is volatile.
-      if ((*FirstBR->memoperands_begin())->isVolatile())
-        return true;
+    // Standard conditional branch analysis
+    Cond.push_back(MachineOperand::CreateImm(FirstBR->getOpcode()));
+    for (unsigned i = 1; i < FirstBR->getNumExplicitOperands(); ++i) {
+      Cond.push_back(FirstBR->getOperand(i));
     }
 
-    Cond.clear();
-    Cond.push_back(MachineOperand::CreateImm(FirstBR->getOpcode()));
-    // Push all arguments except the branch destination; that's not part of the
-    // condition.
-    for (unsigned I = 1, E = FirstBR->getNumExplicitOperands(); I != E; ++I)
-      Cond.push_back(FirstBR->getOperand(I));
+    auto Second = std::next(I);
+    if (Second == MBB.end()) {
+      // Conditional branch only
+      FBB = nullptr;
+      return false;
+    }
+
+    // Handle the second branch (unconditional)
+    if (Second->getOpcode() == MOS::JMP || 
+        Second->getOpcode() == MOS::BRA || 
+        Second->getOpcode() == MOS::JMP_AbsoluteLong) {
+      FBB = getBranchDestBlock(*Second);
+      if (!FBB) return true;
+      return false;
+    }
+    
+    // Unknown sequence
+    return true;
   }
 
-  // If there's no second branch, done.
-  if (I == MBB.end()) {
-    FBB = nullptr;
+  // Handle a single unconditional branch
+  if (FirstBR->getOpcode() == MOS::JMP || 
+      FirstBR->getOpcode() == MOS::BRA || 
+      FirstBR->getOpcode() == MOS::JMP_AbsoluteLong) {
+    FBB = nullptr; // TBB is the target
+    Cond.clear();
     return false;
   }
 
-  // Cannot analyze branch followed by non-branch.
-  if (!I->isBranch())
-    return true;
-
-  auto SecondBR = I++;
-
-  // If any instructions follow the second branch, cannot analyze.
-  if (I != MBB.end())
-    return true;
-
-  // Exactly two branches present.
-
-  // Can only analyze conditional branch followed by unconditional branch.
-  if (!SecondBR->isUnconditionalBranch() || SecondBR->isPreISelOpcode())
-    return true;
-
-  // Second unconditional branch forms false edge.
-  FBB = getBranchDestBlock(*SecondBR);
-  if (!FBB)
-    return true;
-  return false;
+  return true; // Unknown
 }
-
 unsigned MOSInstrInfo::removeBranch(MachineBasicBlock &MBB,
                                     int *BytesRemoved) const {
-  auto Begin = MBB.getFirstTerminator();
-  auto End = MBB.end();
+  auto I = MBB.getFirstTerminator();
+  unsigned NumRemoved = 0;
+  if (BytesRemoved) *BytesRemoved = 0;
 
-  unsigned NumRemoved = std::distance(Begin, End);
-  if (BytesRemoved) {
-    *BytesRemoved = 0;
-    for (const auto &I : make_range(Begin, End))
-      *BytesRemoved += getInstSizeInBytes(I);
+  while (I != MBB.end()) {
+    if (I->getOpcode() == MOS::JMP || 
+        I->getOpcode() == MOS::BRA || 
+        I->getOpcode() == MOS::JMP_AbsoluteLong || 
+        I->isConditionalBranch()) {
+      
+      if (BytesRemoved) *BytesRemoved += getInstSizeInBytes(*I);
+      auto Next = std::next(I);
+      I->eraseFromParent();
+      I = Next;
+      NumRemoved++;
+    } else {
+      ++I;
+    }
   }
-  MBB.erase(Begin, End);
   return NumRemoved;
 }
 

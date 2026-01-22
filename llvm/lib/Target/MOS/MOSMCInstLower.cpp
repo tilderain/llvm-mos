@@ -73,6 +73,21 @@ void MOSMCInstLower::lower(const MachineInstr *MI, MCInst &OutMI) {
   default:
     OutMI.setOpcode(MI->getOpcode());
     break;
+  case MOS::JMLIndir: {
+    // $DC is the "JML [addr]" opcode
+    OutMI.setOpcode(MOS::JML_Indirect16); 
+    
+    const MachineOperand &MO = MI->getOperand(0);
+    if (MO.isReg()) {
+      Register Reg = MO.getReg();
+      // Get the ZP symbol (e.g. __rc0)
+      const MOSRegisterInfo &TRI = *MI->getMF()->getSubtarget<MOSSubtarget>().getRegisterInfo();
+      const MCExpr *Expr = MCSymbolRefExpr::create(
+          Ctx.getOrCreateSymbol(TRI.getImag8SymbolName(Reg)), Ctx);
+      OutMI.addOperand(MCOperand::createExpr(Expr));
+    }
+    return;
+  }
   case MOS::ADCZpIdx:
   case MOS::SBCZpIdx:
   case MOS::ADCAbsIdx:
@@ -1051,16 +1066,17 @@ MCOperand MOSMCInstLower::lowerSymbolOperand(const MachineOperand &MO,
                                /*isNegated=*/false, Ctx);
     }
     break;
-  case MOS::MO_UPPER:
-    // Extract the bank byte (bits 16-23).
-    // Uses VK_ADDR24_BANK which corresponds to the '^' modifier or relocation.
-    if (ZP) {
-        Expr = MCConstantExpr::create(0, Ctx);
-    } else {
-        Expr = MOSMCExpr::create(MOSMCExpr::VK_ADDR24_BANK, Expr,
-                                /*isNegated=*/false, Ctx);
-    }
-    break;
+
+    case MOS::MO_UPPER:
+      if (MO.isJTI()) {
+          // Point to the 3rd byte array in the split jump table
+          const auto &Table = MO.getParent()->getMF()->getJumpTableInfo()->getJumpTables()[MO.getIndex()];
+          Expr = MCBinaryExpr::createAdd(Expr, MCConstantExpr::create(Table.MBBs.size() * 2, Ctx), Ctx);
+      } else {
+          Expr = MOSMCExpr::create(MOSMCExpr::VK_ADDR24_BANK, Expr, false, Ctx);
+      }
+      break;
+    
   case MOS::MO_HI_JT: {
     // Jump tables are partitioned in two arrays: first all the low bytes,
     // then all the high bytes. This index referes to the high byte array, so
