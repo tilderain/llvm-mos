@@ -2511,63 +2511,69 @@ bool MOSLegalizerInfo::legalizeBrJt(LegalizerHelper &Helper,
   Register Offset = Builder.buildTrunc(S8, MI.getOperand(2)).getReg(0);
 
   if (STI.hasJMPIdxIndir() && !STI.hasW65816() && Table.MBBs.size() <= 128) {
+    // 6502 with JMP (Indirect, X) support
     Offset =
         Builder.buildShl(S8, Offset, Builder.buildConstant(S8, 1)).getReg(0);
     Builder.buildInstr(MOS::G_BRINDIRECT_IDX)
         .add(MI.getOperand(1))
         .addUse(Offset);
+  } else if (STI.hasW65816()) {
+    // W65816 24-bit Jump Table Logic
+    auto tableIdx = MI.getOperand(1).getIndex();
+
+    // Helper to build LDA long, X ($BF).
+    // We load into A, then immediately COPY to a Zero Page register.
+    auto buildLdaLongX = [&](unsigned TF) {
+      // 1. Create a register strictly for the Accumulator
+      Register regA = MRI.createGenericVirtualRegister(S8);
+      MRI.setRegClass(regA, &MOS::AcRegClass); 
+      
+      Builder.buildInstr(MOS::G_LOAD_ABS_LONG_INDEXED)
+          .addDef(regA)
+          .addJumpTableIndex(tableIdx, TF)
+          .addUse(Offset);
+
+      // 2. Force copy to Zero Page (Imag8) immediately.
+      Register regZP = MRI.createGenericVirtualRegister(S8);
+      MRI.setRegClass(regZP, &MOS::Imag8RegClass);
+      Builder.buildCopy(regZP, regA);
+      
+      return regZP;
+    };
+
+    // FIX: Use 0 (No Flags) for the first load. 
+    // MO_LO would truncate the address to 8 bits, breaking the 24-bit load opcode ($BF).
+    // 0 ensures the full 24-bit address of the table base is emitted.
+    Register lo = buildLdaLongX(0); 
+    
+    // HI_JT adds +TableSize, UPPER adds +2*TableSize.
+    Register hi = buildLdaLongX(MOS::MO_HI_JT);
+    Register bank = buildLdaLongX(MOS::MO_UPPER);
+
+    Register zero = Builder.buildConstant(S8, 0).getReg(0);
+
+    // Merge the ZP registers into a 32-bit pointer. 
+    auto ptr = Builder.buildMergeValues(LLT::pointer(0, 32),
+                                        {lo, hi, bank, zero});
+
+    Builder.buildBrIndirect(ptr.getReg(0));
   } else {
-    // This is the manual expansion path.
+    // Standard 6502 manual expansion
     Register LoAddr = MRI.createGenericVirtualRegister(S8);
-    Builder.buildInstr(MOS::G_LOAD_ABS_IDX).addDef(LoAddr).add(MI.getOperand(1)).addUse(Offset);
+    Builder.buildInstr(MOS::G_LOAD_ABS_IDX)
+        .addDef(LoAddr)
+        .add(MI.getOperand(1))
+        .addUse(Offset);
 
     Register HiAddr = MRI.createGenericVirtualRegister(S8);
-    Builder.buildInstr(MOS::G_LOAD_ABS_IDX).addDef(HiAddr)
-           .addJumpTableIndex(MI.getOperand(1).getIndex(), MOS::MO_HI_JT).addUse(Offset);
+    Builder.buildInstr(MOS::G_LOAD_ABS_IDX)
+        .addDef(HiAddr)
+        .addJumpTableIndex(MI.getOperand(1).getIndex(), MOS::MO_HI_JT)
+        .addUse(Offset);
 
-    
-if (STI.hasW65816()) {
-    LLT S8 = LLT::scalar(8);
-    
-    // Create virtual registers for the 3 bytes
-    Register LoVal = MRI.createGenericVirtualRegister(S8);
-    Register HiVal = MRI.createGenericVirtualRegister(S8);
-    Register BankVal = MRI.createGenericVirtualRegister(S8);
-
-    // CRITICAL: Force these to the Accumulator (Ac) class
-    // This prevents the selector from picking LDY or LDX.
-    MRI.setRegClass(LoVal, &MOS::AcRegClass);
-    MRI.setRegClass(HiVal, &MOS::AcRegClass);
-    MRI.setRegClass(BankVal, &MOS::AcRegClass);
-
-    // Use G_LOAD_ABS_LONG (or G_LOAD_ABS_LONG_IDX if you defined it)
-    // To ensure the 'BF' opcode is used for all three.
-    Builder.buildInstr(MOS::G_LOAD_ABS_LONG)
-           .addDef(LoVal)
-           .addJumpTableIndex(MI.getOperand(1).getIndex(), MOS::MO_LO)
-           .addUse(Offset);
-
-    Builder.buildInstr(MOS::G_LOAD_ABS_LONG)
-           .addDef(HiVal)
-           .addJumpTableIndex(MI.getOperand(1).getIndex(), MOS::MO_HI_JT)
-           .addUse(Offset);
-
-    Builder.buildInstr(MOS::G_LOAD_ABS_LONG)
-           .addDef(BankVal)
-           .addJumpTableIndex(MI.getOperand(1).getIndex(), MOS::MO_UPPER)
-           .addUse(Offset);
-
-    // Merge into the pointer
-    Register Zero = Builder.buildConstant(S8, 0).getReg(0);
-    auto Ptr = Builder.buildMergeValues(LLT::pointer(0, 32), 
-                                       {LoVal, HiVal, BankVal, Zero});
-    Builder.buildBrIndirect(Ptr.getReg(0));
-}else {
-      // Original 6502 16-bit logic
-      Builder.buildBrIndirect(
-          Builder.buildMergeValues(LLT::pointer(0, 16), {LoAddr, HiAddr})
-              .getReg(0));
-    }
+    Builder.buildBrIndirect(
+        Builder.buildMergeValues(LLT::pointer(0, 16), {LoAddr, HiAddr})
+            .getReg(0));
   }
 
   MI.eraseFromParent();

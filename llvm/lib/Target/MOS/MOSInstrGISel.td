@@ -232,3 +232,10 @@ def G_BRINDIRECT_IDX : MOSGenericInstruction {
   let isBarrier = true;
   let isIndirectBranch = true;
 }
+
+
+def G_LOAD_ABS_LONG_INDEXED : MOSGenericInstruction {
+  let OutOperandList = (outs type0:$dst);
+  let InOperandList = (ins unknown:$addr, type1:$index);
+  let mayLoad = true;
+}

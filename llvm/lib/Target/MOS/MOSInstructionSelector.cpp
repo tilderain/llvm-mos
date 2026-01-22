@@ -256,6 +256,7 @@ bool MOSInstructionSelector::select(MachineInstr &MI) {
   case MOS::G_LOAD_INDIR:
   case MOS::G_LOAD_INDIR_IDX:
   case MOS::G_LOAD_ABS_LONG:        // Add this line
+  case MOS::G_LOAD_ABS_LONG_INDEXED: // ADD THIS LINE
   case MOS::G_LOAD_INDIR_LONG:      // Add this line
   case MOS::G_LOAD_INDIR_LONG_IDX:  // Add this line
   case MOS::G_PHI:
@@ -2247,6 +2248,17 @@ bool MOSInstructionSelector::selectGeneric(MachineInstr &MI) {
   case MOS::G_STORE_INDIR_LONG_IDX:
     Opcode = MOS::STIndirLongIdx;
     break;
+
+  case MOS::G_LOAD_ABS_LONG_INDEXED:
+
+    MI.setDesc(TII.get(MOS::LDA_AbsoluteXLong)); // Opcode $BF
+    // Force index to X
+    constrainOperandRegClass(MI.getOperand(2), MOS::XcRegClass);
+    // Force destination to Ac
+    constrainOperandRegClass(MI.getOperand(0), MOS::AcRegClass);
+    
+    MI.addImplicitDefUseOperands(*MI.getMF());
+    return constrainSelectedInstRegOperands(MI, TII, TRI, RBI);
   }
   MI.setDesc(TII.get(Opcode));
   MI.addImplicitDefUseOperands(*MI.getMF());

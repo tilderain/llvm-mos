@@ -855,6 +855,15 @@ case MOS::LDImm:
     return;
   }
 
+  case MOS::LDA_AbsoluteXLong: {
+    OutMI.setOpcode(MOS::LDA_AbsoluteXLong);
+    MCOperand addr, idx;
+    lowerOperand(MI->getOperand(1), addr); // The Table Symbol
+    lowerOperand(MI->getOperand(2), idx);  // The X register
+    OutMI.addOperand(addr);
+    OutMI.addOperand(idx);
+    return;
+  }
   case MOS::LDIndirLong:
     OutMI.setOpcode(MOS::LDA_IndirectLong);
     goto handle_indir_long;
@@ -1042,54 +1051,52 @@ MCOperand MOSMCInstLower::lowerSymbolOperand(const MachineOperand &MO,
     ZP = false;
   }
 
-  const MCExpr *Expr = MCSymbolRefExpr::create(Sym, Ctx);
-  if (!MO.isJTI() && MO.getOffset() != 0)
-    Expr = MCBinaryExpr::createAdd(
-        Expr, MCConstantExpr::create(MO.getOffset(), Ctx), Ctx);
+  
+  // FIX: If this is a Jump Table, we MUST use the Jump Table Symbol.
+  // Using 'Sym' directly here often defaults to ZP address 0 for JTs.
+  const MCExpr *Expr = MO.isJTI() ? 
+      MCSymbolRefExpr::create(AP.GetJTISymbol(MO.getIndex()), Ctx) :
+      MCSymbolRefExpr::create(Sym, Ctx);
+
   switch (MO.getTargetFlags()) {
-  default:
-    llvm_unreachable("Invalid target operand flags.");
+
   case MOS::MO_NO_FLAGS:
   case MOS::MO_ZEROPAGE:
     break;
+
   case MOS::MO_LO:
+    // Extract Bits 0-7
     if (!ZP) {
-      Expr = MOSMCExpr::create(MOSMCExpr::VK_ADDR16_LO, Expr,
-                               /*isNegated=*/false, Ctx);
-    }
-    break;
-  case MOS::MO_HI:
-    if (ZP) {
-      Expr = MCConstantExpr::create(0, Ctx);
-    } else {
-      Expr = MOSMCExpr::create(MOSMCExpr::VK_ADDR16_HI, Expr,
-                               /*isNegated=*/false, Ctx);
+      Expr = MOSMCExpr::create(MOSMCExpr::VK_ADDR16_LO, Expr, false, Ctx);
     }
     break;
 
-    case MOS::MO_UPPER:
-      if (MO.isJTI()) {
-          // Point to the 3rd byte array in the split jump table
-          const auto &Table = MO.getParent()->getMF()->getJumpTableInfo()->getJumpTables()[MO.getIndex()];
-          Expr = MCBinaryExpr::createAdd(Expr, MCConstantExpr::create(Table.MBBs.size() * 2, Ctx), Ctx);
-      } else {
-          Expr = MOSMCExpr::create(MOSMCExpr::VK_ADDR24_BANK, Expr, false, Ctx);
-      }
-      break;
-    
-  case MOS::MO_HI_JT: {
-    // Jump tables are partitioned in two arrays: first all the low bytes,
-    // then all the high bytes. This index referes to the high byte array, so
-    // offset the appropriate amount into the overall array.
-    assert(MO.isJTI());
-    const MachineJumpTableInfo *JTI =
-        MO.getParent()->getMF()->getJumpTableInfo();
-    const auto &Table = JTI->getJumpTables()[MO.getIndex()];
-    assert(Table.MBBs.size() <= 256);
-    Expr = MCBinaryExpr::createAdd(
-        Expr, MCConstantExpr::create(Table.MBBs.size(), Ctx), Ctx);
+  case MOS::MO_HI:
+    // Extract Bits 8-15
+    if (ZP) {
+      // If it's truly Zero Page, the high byte is always 0
+      Expr = MCConstantExpr::create(0, Ctx);
+    } else {
+      Expr = MOSMCExpr::create(MOSMCExpr::VK_ADDR16_HI, Expr, false, Ctx);
+    }
+    break;
+  case MOS::MO_HI_JT:
+    // For Jump Tables, HI is the table base + 1 * TableSize
+    if (MO.isJTI()) {
+        const auto &Table = MO.getParent()->getMF()->getJumpTableInfo()->getJumpTables()[MO.getIndex()];
+        Expr = MCBinaryExpr::createAdd(Expr, MCConstantExpr::create(Table.MBBs.size(), Ctx), Ctx);
+    }
+    break;
+  case MOS::MO_UPPER:
+    // For Jump Tables, UPPER is the table base + 2 * TableSize
+    if (MO.isJTI()) {
+        const auto &Table = MO.getParent()->getMF()->getJumpTableInfo()->getJumpTables()[MO.getIndex()];
+        Expr = MCBinaryExpr::createAdd(Expr, MCConstantExpr::create(Table.MBBs.size() * 2, Ctx), Ctx);
+    } else {
+        Expr = MOSMCExpr::create(MOSMCExpr::VK_ADDR24_BANK, Expr, false, Ctx);
+    }
     break;
   }
-  }
   return MCOperand::createExpr(Expr);
+
 }
