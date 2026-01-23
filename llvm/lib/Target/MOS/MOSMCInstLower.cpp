@@ -1036,7 +1036,6 @@ bool MOSMCInstLower::lowerOperand(const MachineOperand &MO, MCOperand &MCOp) {
   }
   return true;
 }
-
 MCOperand MOSMCInstLower::lowerSymbolOperand(const MachineOperand &MO,
                                              const MCSymbol *Sym) {
   const MachineFrameInfo &MFI = MO.getParent()->getMF()->getFrameInfo();
@@ -1051,12 +1050,16 @@ MCOperand MOSMCInstLower::lowerSymbolOperand(const MachineOperand &MO,
     ZP = false;
   }
 
-  
   // FIX: If this is a Jump Table, we MUST use the Jump Table Symbol.
-  // Using 'Sym' directly here often defaults to ZP address 0 for JTs.
   const MCExpr *Expr = MO.isJTI() ? 
       MCSymbolRefExpr::create(AP.GetJTISymbol(MO.getIndex()), Ctx) :
       MCSymbolRefExpr::create(Sym, Ctx);
+
+  // FIX: Restore the offset addition logic. This was missing, causing 
+  // struct member accesses to point to the base of the struct.
+  if (!MO.isJTI() && MO.getOffset() != 0)
+    Expr = MCBinaryExpr::createAdd(
+        Expr, MCConstantExpr::create(MO.getOffset(), Ctx), Ctx);
 
   switch (MO.getTargetFlags()) {
 
@@ -1098,5 +1101,4 @@ MCOperand MOSMCInstLower::lowerSymbolOperand(const MachineOperand &MO,
     break;
   }
   return MCOperand::createExpr(Expr);
-
 }
