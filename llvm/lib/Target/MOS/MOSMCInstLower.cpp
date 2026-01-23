@@ -1024,13 +1024,16 @@ bool MOSMCInstLower::lowerOperand(const MachineOperand &MO, MCOperand &MCOp) {
 
     if (Reg == 0) return false; 
 
-    if (MOS::Imag16RegClass.contains(Reg) || MOS::Imag8RegClass.contains(Reg) ||
-        MOS::Imag24RegClass.contains(Reg)) {
-    // This will now use RC2 instead of RL0 for the 'upper' byte
-    const MCExpr *Expr = MCSymbolRefExpr::create(
-        Ctx.getOrCreateSymbol(TRI.getImag8SymbolName(Reg)), Ctx);
-    MCOp = MCOperand::createExpr(Expr);
-  } else 
+    if (MOS::Imag24RegClass.contains(Reg) || MOS::Imag16RegClass.contains(Reg) || MOS::Imag8RegClass.contains(Reg)) {
+      // Recursively find the lowest 8-bit subregister to get the ZP base address symbol
+      while (unsigned Sub = TRI.getSubReg(Reg, MOS::sublo)) {
+          Reg = Sub;
+      }
+      const MCExpr *Expr = MCSymbolRefExpr::create(
+          Ctx.getOrCreateSymbol(TRI.getImag8SymbolName(Reg)), Ctx);
+      MCOp = MCOperand::createExpr(Expr);
+      break;
+    } else 
       MCOp = MCOperand::createReg(Reg);
     break;
   }

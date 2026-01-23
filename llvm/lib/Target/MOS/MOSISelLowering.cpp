@@ -68,6 +68,13 @@ bool MOSTargetLowering::isSuitableForJumpTable(const SwitchInst *SI,
 }
 
 MVT MOSTargetLowering::getRegisterType(MVT VT) const {
+  // FIX: Force i16 to be treated as legal type to match CallingConv logic.
+  // This prevents MVT::i16 from being split into i8s in SelectionDAG,
+  // resolving mismatches between GlobalISel and DAG logic that can lead to
+  // incorrect stack slot sizing or live range calculations.
+  if (VT == MVT::i16)
+    return MVT::i16;
+
   // Even though a 16-bit register is available, it's not actually an integer
   // register, so split to 8 bits instead.
   if (VT.getSizeInBits() > 8)
@@ -78,6 +85,10 @@ MVT MOSTargetLowering::getRegisterType(MVT VT) const {
 unsigned
 MOSTargetLowering::getNumRegisters(LLVMContext &Context, EVT VT,
                                    std::optional<MVT> RegisterVT) const {
+  // FIX: Force i16 to use 1 register (Imag16) to match CallingConv logic.
+  if (VT == MVT::i16)
+    return 1;
+
   // Even though a 16-bit register is available, it's not actually an integer
   // register, so split to 8 bits instead. Use ceiling division to ensure
   // non-power-of-2 types like i9 get enough registers.
@@ -85,7 +96,6 @@ MOSTargetLowering::getNumRegisters(LLVMContext &Context, EVT VT,
     return (VT.getSizeInBits() + 7) / 8;
   return TargetLowering::getNumRegisters(Context, VT, RegisterVT);
 }
-
 MVT MOSTargetLowering::getRegisterTypeForCallingConv(
     LLVMContext &Context, CallingConv::ID CC, EVT VT,
     const ISD::ArgFlagsTy &Flags) const {
@@ -95,8 +105,23 @@ MVT MOSTargetLowering::getRegisterTypeForCallingConv(
       return MVT::i32;
     return Flags.getPointerAddrSpace() == MOS::AS_ZeroPage ? MVT::i8 : MVT::i16;
   }
+  
+  // FIX: Force i16 to be treated as a single i16 unit for calling conventions.
+  // This enables the CC_MOS rule that assigns i16 to RS registers, preventing
+  // clobbering of atomic 16-bit arguments.
+  if (VT == MVT::i16)
+    return MVT::i16;
+
+  // FIX: Force i32 to be treated as a single unit on W65816.
+  // This prevents it from being split into two i16s, which would bypass the
+  // CC_MOS rule that assigns i32 to RL registers.
+  if (STI.hasW65816() && VT == MVT::i32)
+    return MVT::i32;
+
   return TargetLowering::getRegisterTypeForCallingConv(Context, CC, VT, Flags);
 }
+
+
 
 unsigned MOSTargetLowering::getNumRegistersForCallingConv(
     LLVMContext &Context, CallingConv::ID CC, EVT VT,
@@ -106,6 +131,15 @@ unsigned MOSTargetLowering::getNumRegistersForCallingConv(
     MVT RegVT = getRegisterTypeForCallingConv(Context, CC, VT, Flags);
     return (VT.getSizeInBits() + RegVT.getSizeInBits() - 1) / RegVT.getSizeInBits();
   }
+  
+  // FIX: Force i16 to use exactly 1 register (the Imag16 RS register).
+  if (VT == MVT::i16)
+    return 1;
+
+  // FIX: Force i32 to use exactly 1 register (the Imag32 RL register) on W65816.
+  if (STI.hasW65816() && VT == MVT::i32)
+    return 1;
+
   return TargetLowering::getNumRegistersForCallingConv(Context, CC, VT, Flags);
 }
 

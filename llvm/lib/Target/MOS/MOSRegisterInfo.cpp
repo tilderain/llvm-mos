@@ -43,7 +43,6 @@
 #include "MOSGenRegisterInfo.inc"
 
 using namespace llvm;
-
 MOSRegisterInfo::MOSRegisterInfo()
     : MOSGenRegisterInfo(/*RA=*/0, /*DwarfFlavor=*/0, /*EHFlavor=*/0,
                          /*PC=*/0, /*HwMode=*/0),
@@ -53,7 +52,6 @@ MOSRegisterInfo::MOSRegisterInfo()
 
   for (unsigned Reg : seq(0u, getNumRegs())) {
     unsigned R = Reg;
-    // If it's 32-bit or 16-bit, get the 8-bit base for the symbol name
     if (MOS::Imag24RegClass.contains(R))
       R = getSubReg(R, MOS::sublo);
     else if (MOS::Imag16RegClass.contains(R))
@@ -62,40 +60,23 @@ MOSRegisterInfo::MOSRegisterInfo()
     if (!MOS::Imag8RegClass.contains(R))
       continue;
       
-    // __rc0, __rc1, etc.
     std::string &Str = Imag8SymbolNames[Reg];
     Str = "__";
     Str += getName(R);
     std::transform(Str.begin(), Str.end(), Str.begin(), ::tolower);
   }
 
+  // FIX: Reserve RS0 (Stack Pointer) only.
+  // Do NOT reserve RL0, as that would reserve RS1 ($04), preventing its use for arguments.
+  reserveAllSubregs(&Reserved, MOS::RS0); 
 
-
-  for (unsigned R : seq_inclusive((unsigned)MOS::RS32, (unsigned)MOS::RS127))
-    reserveAllSubregs(&Reserved, Register(R));
-
-// Reserve RL8 and above to maintain consistency with RS reservation
-
-
-  // RL0 contains RC0, RC1, RC2, RC3. 
-  // This effectively reserves RS0 (RC0+1) and RS1 (RC2+3).
-  reserveAllSubregs(&Reserved, MOS::RL0); 
-
-  // RL2 contains RC8, RC9, RC10, RC11.
-  // This effectively reserves RS4 (RC8+9) and RS5 (RC10+11).
-  // NOTE: If RS8 is your scavenger, ensure the RL that covers it is reserved!
-  // Assuming RS8 is RC16+17, that would be part of RL4.
+  // Reserve the Register Scavenger area (RL4).
   reserveAllSubregs(&Reserved, MOS::RL4); 
-// (RL0-7 cover RS0-15)
 
-
-  for (unsigned R : seq_inclusive((unsigned)MOS::RL16, (unsigned)MOS::RL63))
+  // Reserve unused RLs (RL8..RL63).
+  // Note: RL1, RL2, RL3, RL5, RL6 are left available for 32-bit operations.
+  for (unsigned R : seq_inclusive((unsigned)MOS::RL8, (unsigned)MOS::RL63))
     reserveAllSubregs(&Reserved, Register(R));
-
-  // Reserve one temporary register for use by register scavenger.
-  reserveAllSubregs(&Reserved, MOS::RS8);
-
-  
 }
 
 const MCPhysReg *

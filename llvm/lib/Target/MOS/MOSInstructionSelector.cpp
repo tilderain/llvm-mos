@@ -2080,49 +2080,24 @@ bool MOSInstructionSelector::selectUnMergeValues(MachineInstr &MI) {
 
   // Handle 32-bit unmerge to 16-bit parts
 
-  if (Ty.getSizeInBits() == 32 && DstTy.getSizeInBits() == 16) {
+
+if (Ty.getSizeInBits() == 32 && DstTy.getSizeInBits() == 16) {
     Register Lo16 = MI.getOperand(0).getReg();
     Register Hi16 = MI.getOperand(1).getReg();
-    LLT S8 = LLT::scalar(8);
+    Register Src = MI.getOperand(2).getReg();
 
-    // Extract Lower 16 bits manually
-    Register Lo8 = Builder.getMRI()->createGenericVirtualRegister(S8);
-    auto LoCopy = Builder.buildCopy(Lo8, Src);
-    LoCopy->getOperand(1).setSubReg(MOS::sublo);
+    // Copy the 32-bit source into the 16-bit destination using the new indices
+    auto LoCopy = Builder.buildCopy(Lo16, Src);
+    LoCopy->getOperand(1).setSubReg(MOS::sublo16);
     constrainGenericOp(*LoCopy);
 
-    Register Hi8 = Builder.getMRI()->createGenericVirtualRegister(S8);
-    auto HiCopy = Builder.buildCopy(Hi8, Src);
-    HiCopy->getOperand(1).setSubReg(MOS::subhi);
+    auto HiCopy = Builder.buildCopy(Hi16, Src);
+    HiCopy->getOperand(1).setSubReg(MOS::subhi16);
     constrainGenericOp(*HiCopy);
-
-    auto RegSeqLo = Builder.buildInstr(MOS::REG_SEQUENCE)
-                      .addDef(Lo16)
-                      .addUse(Lo8).addImm(MOS::sublo)
-                      .addUse(Hi8).addImm(MOS::subhi);
-    constrainGenericOp(*RegSeqLo);
-
-    // Extract Upper 16 bits by extracting 8-bit parts and merging
-    // Explicitly create virtual registers to handle the merge cleanly
-    Register Up8 = Builder.getMRI()->createGenericVirtualRegister(S8);
-    auto UpCopy = Builder.buildCopy(Up8, Src);
-    UpCopy->getOperand(1).setSubReg(MOS::subbank);
-    constrainGenericOp(*UpCopy);
-
-    Register Top8 = Builder.getMRI()->createGenericVirtualRegister(S8);
-    auto TopCopy = Builder.buildCopy(Top8, Src);
-    TopCopy->getOperand(1).setSubReg(MOS::subpad);
-    constrainGenericOp(*TopCopy);
-
-    auto RegSeqHi = Builder.buildInstr(MOS::REG_SEQUENCE)
-                      .addDef(Hi16)
-                      .addUse(Up8).addImm(MOS::sublo)
-                      .addUse(Top8).addImm(MOS::subhi);
-    constrainGenericOp(*RegSeqHi);
 
     MI.eraseFromParent();
     return true;
-  }
+}
 
   // Handle 16-bit unmerge (Existing logic)
   Register Lo = MI.getOperand(0).getReg();
